@@ -117,6 +117,10 @@ class CConsole : public IConsole
 			m_apArgs[m_NumArgs++] = pArg;
 		}
 
+		int GetIntegerOr(unsigned Index, int Default) const;
+		float GetFloatOr(unsigned Index, float Default) const;
+		const char* GetStringOr(unsigned Index, const char* pDefault) const;
+
 		const char *GetString(unsigned Index) const override;
 		int GetInteger(unsigned Index) const override;
 		float GetFloat(unsigned Index) const override;
@@ -226,6 +230,9 @@ public:
 	void SetTeeHistorianCommandCallback(FTeeHistorianCommandCallback pfnCallback, void *pUser) override;
 	void SetUnknownCommandCallback(FUnknownCommandCallback pfnCallback, void *pUser) override;
 	void InitChecksum(CChecksumData *pData) const override;
+
+	void PrintF(int Level, const char* pFrom, const char* pStr, ...) override;
+	void PrintF(ColorRGBA PrintColor, int Level, const char* pFrom, const char* pStr, ...);
 
 	void SetAccessLevel(int AccessLevel) override { m_AccessLevel = clamp(AccessLevel, (int)(ACCESS_LEVEL_ADMIN), (int)(ACCESS_LEVEL_USER)); }
 	void ResetGameSettings() override;

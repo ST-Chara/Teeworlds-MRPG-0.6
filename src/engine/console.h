@@ -50,6 +50,10 @@ public:
 		IResult() { m_NumArgs = 0; }
 		virtual ~IResult() {}
 
+		virtual int GetIntegerOr(unsigned Index, int Default) const = 0;
+		virtual float GetFloatOr(unsigned Index, float Default) const = 0;
+		virtual const char* GetStringOr(unsigned Index, const char* pDefault) const = 0;
+
 		virtual int GetInteger(unsigned Index) const = 0;
 		virtual float GetFloat(unsigned Index) const = 0;
 		virtual const char *GetString(unsigned Index) const = 0;
@@ -121,6 +125,9 @@ public:
 	virtual void SetTeeHistorianCommandCallback(FTeeHistorianCommandCallback pfnCallback, void *pUser) = 0;
 	virtual void SetUnknownCommandCallback(FUnknownCommandCallback pfnCallback, void *pUser) = 0;
 	virtual void InitChecksum(CChecksumData *pData) const = 0;
+
+	virtual void PrintF(int Level, const char* pFrom, const char* pStr, ...) = 0;
+	virtual void PrintF(ColorRGBA PrintColor, int Level, const char* pFrom, const char* pStr, ...) = 0;
 
 	virtual void SetAccessLevel(int AccessLevel) = 0;
 

@@ -2,21 +2,9 @@
 /* If you are missing that file, acquire a complete release at teeworlds.com.                */
 
 #include "layers.h"
-
 #include "mapitems.h"
 
 #include <engine/map.h>
-
-CLayers::CLayers()
-{
-	m_GroupsNum = 0;
-	m_GroupsStart = 0;
-	m_LayersNum = 0;
-	m_LayersStart = 0;
-	m_pGameGroup = 0;
-	m_pGameLayer = 0;
-	m_pMap = 0;
-}
 
 void CLayers::Init(class IKernel* pKernel, int ID)
 {
@@ -33,6 +21,7 @@ void CLayers::Init(class IKernel* pKernel, int ID)
 
 			if (pLayer->m_Type == LAYERTYPE_TILES)
 			{
+				bool IsEntities = false;
 				CMapItemLayerTilemap* pTilemap = reinterpret_cast<CMapItemLayerTilemap*>(pLayer);
 
 				if (pTilemap->m_Flags & TILESLAYERFLAG_GAME)
@@ -55,13 +44,61 @@ void CLayers::Init(class IKernel* pKernel, int ID)
 						m_pGameGroup->m_ClipH = 0;
 					}
 
-					//break;
+					IsEntities = true;
+				}
+
+				if(pTilemap->m_Flags & TILESLAYERFLAG_FRONT)
+				{
+					if(pTilemap->m_Version <= 2)
+					{
+						pTilemap->m_Front = *((int*)(pTilemap)+17);
+					}
+					m_pFrontLayer = pTilemap;
+					IsEntities = true;
+				}
+
+				if(pTilemap->m_Flags & TILESLAYERFLAG_TELE)
+				{
+					if(pTilemap->m_Version <= 2)
+					{
+						pTilemap->m_Tele = *((int*)(pTilemap)+15);
+					}
+
+					m_pTeleLayer = pTilemap;
+					IsEntities = true;
+				}
+
+				if(pTilemap->m_Flags & TILESLAYERFLAG_SWITCH)
+				{
+					if(pTilemap->m_Version <= 2)
+					{
+						pTilemap->m_Switch = *((int*)(pTilemap)+18);
+					}
+
+					m_pSwitchLayer = pTilemap;
+					IsEntities = true;
+				}
+
+				if(pTilemap->m_Flags & TILESLAYERFLAG_SPEEDUP)
+				{
+					if(pTilemap->m_Version <= 2)
+					{
+						pTilemap->m_Speedup = *((int*)(pTilemap)+16);
+					}
+					m_pSpeedupLayer = pTilemap;
+					IsEntities = true;
+				}
+
+				if(IsEntities)
+				{
+					pTilemap->m_Color = CColor(255, 255, 255, 255);
 				}
 			}
 		}
 	}
 
 	InitTilemapSkip();
+	InitSettings();
 }
 
 void CLayers::InitBackground(class IMap* pMap)
@@ -141,6 +178,50 @@ void CLayers::InitTilemapSkip()
 				}
 			}
 		}
+	}
+}
+
+void CLayers::InitSettings()
+{
+	int Start = 0, Num = 0;
+	m_pMap->GetType(MAPITEMTYPE_INFO, &Start, &Num);
+	for(int i = Start; i < Start + Num; i++)
+	{
+		int ItemId = 0;
+		const auto* pItem = static_cast<CMapItemInfoSettings*>(m_pMap->GetItem(i, nullptr, &ItemId));
+		if(!pItem || ItemId != 0)
+			continue;
+
+		const int ItemSize = m_pMap->GetItemSize(i);
+		if(ItemSize < static_cast<int>(sizeof(CMapItemInfoSettings)))
+		{
+			dbg_msg("error", "Invalid item size.");
+			break;
+		}
+
+		if(pItem->m_Settings < 0)
+		{
+			dbg_msg("error", "Invalid settings index.");
+			break;
+		}
+
+		const int Size = m_pMap->GetDataSize(pItem->m_Settings);
+		const auto pSettings = static_cast<char*>(m_pMap->GetData(pItem->m_Settings));
+		if(!pSettings || Size <= 0)
+		{
+			dbg_msg("error", "Failed to retrieve settings data.");
+			break;
+		}
+
+		const char* pNext = pSettings;
+		while(pNext < pSettings + Size)
+		{
+			const int StrSize = str_length(pNext) + 1;
+			m_Settings.emplace_back(pNext);
+			pNext += StrSize;
+
+		}
+		break;
 	}
 }
 

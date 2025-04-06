@@ -6,9 +6,6 @@
 #include <base/system.h>
 #include <base/vmath.h>
 
-#include <map>
-#include <vector>
-
 #include <engine/shared/protocol.h>
 #include <generated/protocol.h>
 
@@ -304,6 +301,7 @@ public:
 	void ReadDDNet(const CNetObj_DDNetCharacter* pObjDDNet);
 	bool m_Solo;
 	bool m_Jetpack;
+	bool m_MovingDisabled;
 	bool m_CollisionDisabled;
 	bool m_EndlessHook;
 	bool m_EndlessJump;
@@ -327,10 +325,8 @@ public:
 	bool m_DeepFrozen;
 	bool m_LiveFrozen;
 
+	bool m_DamageDisabled;
 	int m_WorldID;
-
-private:
-	int m_MoveRestrictions;
 };
 
 //input count

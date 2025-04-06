@@ -3,30 +3,29 @@
 #ifndef GAME_SERVER_PLAYER_H
 #define GAME_SERVER_PLAYER_H
 
-#include "mmocore/Components/Accounts/AccountData.h"
-#include "mmocore/Components/Inventory/ItemData.h"
-#include "mmocore/Components/Quests/QuestData.h"
-#include "mmocore/Components/Skills/SkillData.h"
+#include "core/components/accounts/account_data.h"
+#include "core/components/Inventory/ItemData.h"
+#include "core/components/quests/quest_data.h"
+#include "core/components/skills/skill_data.h"
 
 #include "entities/character.h"
+#include "core/tools/cooldown.h"
+#include "core/tools/effect_manager.h"
+#include "core/tools/motd_menu.h"
+#include "core/tools/scenario_manager.h"
+#include "core/tools/vote_wrapper.h"
 
-#include "vote_event_optional.h"
-#include "mmocore/Cooldown.h"
-
-enum
-{
-	WEAPON_SELF = -2, // self die
-	WEAPON_WORLD = -1, // swap world etc
-};
-
+class CPlayerBot;
 class CPlayer
 {
 	MACRO_ALLOC_POOL_ID()
 
 	struct StructLatency
 	{
+		int m_Accum;
 		int m_AccumMin;
 		int m_AccumMax;
+		int m_Avg;
 		int m_Min;
 		int m_Max;
 	};
@@ -37,196 +36,137 @@ class CPlayer
 		int m_TargetY;
 	};
 
-	int m_SnapHealthTick;
-	ska::unordered_map < int, bool > m_aHiddenMenu;
+	int m_SnapHealthNicknameTick;
 
 protected:
-	CCharacter* m_pCharacter;
-	CGS* m_pGS;
-
 	IServer* Server() const;
-	int m_ClientID;
 
-	// lastest afk state
-	bool m_Afk;
-	bool m_LastInputInit;
-	int64_t m_LastPlaytime;
-	CNetObj_PlayerInput* m_pLastInput;
-	std::function<void()> m_PostVotes;
+	CGS* m_pGS {};
+	int m_ClientID {};
+	bool m_MarkForDestroy {};
+	CCharacter* m_pCharacter {};
+	bool m_Afk {};
+	bool m_LastInputInit {};
+	int64_t m_LastPlaytime {};
+	FixedViewCam m_FixedView {};
+	ScenarioManager m_Scenarios {};
 
 public:
 	CGS* GS() const { return m_pGS; }
-	vec2 m_ViewPos;
-	int m_PlayerFlags;
-	int m_aPlayerTick[NUM_TICK];
-	char m_aClanString[128];
-	Mood m_MoodState;
-	CCooldown m_Cooldown {};
+	FixedViewCam& LockedView() { return m_FixedView; }
+	ScenarioManager& Scenarios() { return m_Scenarios; }
 
-	char m_aLastMsg[256];
-	int m_TutorialStep;
+	vec2 m_ViewPos{};
+	int m_PlayerFlags{};
+	int m_aPlayerTick[NUM_TICK]{};
+	char m_aRotateClanBuffer[128]{};
+	char m_aInitialClanBuffer[128]{};
+	Mood m_MoodState{};
+	int m_ActiveCraftGroupID{};
+	std::unique_ptr<MotdMenu> m_pMotdMenu{};
 
+	char m_aLastMsg[256]{};
 	StructLatency m_Latency;
 	StructLastAction m_LatestActivity;
 
 	/* ==========================================================
 		VAR AND OBJECTS PLAYER MMO
 	========================================================== */
+	CCooldown m_Cooldown {};
+	CVotePlayerData m_VotesData {};
+	CMotdPlayerData m_MotdData {};
+	CPlayerDialog m_Dialog;
+	CEffectManager m_Effects {};
 	CTuningParams m_PrevTuningParams;
 	CTuningParams m_NextTuningParams;
-	CPlayerDialog m_Dialog;
 
-	bool m_Spawned;
-	short m_aSortTabs[NUM_SORT_TAB];
-	int m_TempMenuValue;
-	short m_CurrentVoteMenu;
-	short m_LastVoteMenu;
-	bool m_ZoneInvertMenu;
-	bool m_RequestChangeNickname;
-	int m_EidolonCID;
-	bool m_ActivedGroupColors;
-	int m_TickActivedGroupColors;
+	bool m_WantSpawn;
+	bool m_ActivatedGroupColour;
+	int m_TickActivatedGroupColour;
+	std::optional<int> m_EidolonCID;
 
 	/* ==========================================================
 		FUNCTIONS PLAYER ENGINE
 	========================================================== */
 public:
+	CNetObj_PlayerInput* m_pLastInput;
+
 	CPlayer(CGS* pGS, int ClientID);
 	virtual ~CPlayer();
 
-	virtual int GetTeam();
-	virtual bool IsBot() const { return false; }
-	virtual int GetBotID() const { return -1; }
-	virtual int GetBotType() const { return -1; }
-	virtual int GetBotMobID() const { return -1; }
-	virtual	int GetPlayerWorldID() const;
-	virtual CTeeInfo& GetTeeInfo() const;
-
-	virtual int GetStartHealth();
-	int GetStartMana();
-	virtual	int GetHealth() { return GetTempData().m_TempHealth; }
-	virtual	int GetMana() { return GetTempData().m_TempMana; }
 	bool IsAfk() const { return m_Afk; }
 	int64_t GetAfkTime() const;
+	void MarkForDestroy() { m_MarkForDestroy = true; }
+	bool IsMarkedForDestroy() const { return m_MarkForDestroy; }
 
-	void FormatBroadcastBasicStats(char* pBuffer, int Size, const char* pAppendStr = "\0");
+	virtual bool IsBot() const { return false; }
+	virtual int GetTeam();
+	virtual	int GetCurrentWorldID() const;
+	virtual const CTeeInfo& GetTeeInfo() const;
+	virtual int GetMaxHealth() const;
+	virtual int GetMaxMana() const;
+	virtual	int GetHealth() const { return GetTempData().m_TempHealth; }
+	virtual	int GetMana() const { return GetTempData().m_TempMana; }
 
 	virtual void HandleTuningParams();
-	virtual int64_t GetMaskVisibleForClients() const { return -1; };
-	virtual int IsVisibleForClient(int ClientID) const { return 2; }
-	virtual int GetEquippedItemID(ItemFunctional EquipID, int SkipItemID = -1) const;
-	virtual int GetAttributeSize(AttributeIdentifier ID);
-	float GetAttributePercent(AttributeIdentifier ID);
+	virtual int64_t GetMaskVisibleForClients() const { return -1; }
+	virtual ESnappingPriority IsActiveForClient(int ClientID) const { return SNAPPING_PRIORITY_HIGH; }
+	virtual std::optional<int> GetEquippedItemID(ItemType EquipID, int SkipItemID = -1) const;
+	virtual bool IsEquipped(ItemType EquipID) const;
+	virtual int GetTotalAttributeValue(AttributeIdentifier ID) const;
+	float GetAttributeChance(AttributeIdentifier ID) const;
 	virtual void UpdateTempData(int Health, int Mana);
 
-	virtual void GiveEffect(const char* Potion, int Sec, float Chance = 100.0f);
-	virtual bool IsActiveEffect(const char* Potion) const;
-	virtual void ClearEffects();
+	void FormatBroadcastBasicStats(char* pBuffer, int Size, const char* pAppendStr = "\0") const;
 
 	virtual void Tick();
 	virtual void PostTick();
 	virtual void Snap(int SnappingClient);
 	virtual void FakeSnap();
-
-	void RefreshClanString();
-
-	void SetPostVoteListCallback(const std::function<void()> pFunc) { m_PostVotes = pFunc; }
-	bool IsActivePostVoteList() const { return m_PostVotes != nullptr; }
-	void PostVoteList();
-
 	virtual bool IsActive() const { return true; }
-	class CPlayerBot* GetEidolon() const;
+	virtual void PrepareRespawnTick();
+	virtual Mood GetMoodState() const { return Mood::Normal; }
+
+	void RefreshClanTagString();
+
+	CPlayerBot* GetEidolon() const;
 	void TryCreateEidolon();
 	void TryRemoveEidolon();
 
 private:
-	virtual void HandleEffects();
+	virtual void GetFormatedName(char* aBuffer, int BufferSize);
 	virtual void TryRespawn();
 	void HandleScoreboardColors();
 
 public:
+	int GetCID() const { return m_ClientID; }
 	CCharacter* GetCharacter() const;
-
 	void KillCharacter(int Weapon = WEAPON_WORLD);
 	void OnDisconnect();
 	void OnDirectInput(CNetObj_PlayerInput* pNewInput);
 	void OnPredictedInput(CNetObj_PlayerInput* pNewInput) const;
 
-	int GetCID() const { return m_ClientID; }
-	/* ==========================================================
-		FUNCTIONS PLAYER HELPER
-	========================================================== */
-	void ProgressBar(const char* Name, int MyLevel, int MyExp, int ExpNeed, int GivedExp) const;
-	bool Upgrade(int Value, int* Upgrade, int* Useless, int Price, int MaximalUpgrade) const;
-
-	/* ==========================================================
-		FUNCTIONS PLAYER ACCOUNT
-	========================================================== */
-	bool SpendCurrency(int Price, int ItemID = 1);
+	void ProgressBar(const char* pType, int Level, uint64_t Exp, uint64_t ExpNeeded, uint64_t GainedExp) const;
 	const char* GetLanguage() const;
-	void AddExp(int Exp);
-	void AddMoney(int Money);
-
-	bool GetHiddenMenu(int HideID) const;
 	bool IsAuthed() const;
-	int GetStartTeam() const;
-
-	static int ExpNeed(int Level);
-	void IncreaseRelations(int Relations);
-
-	/* ==========================================================
-		FUNCTIONS PLAYER PARSING
-	========================================================== */
 	bool ParseVoteOptionResult(int Vote);
-	bool ParseVoteUpgrades(const char* CMD, int VoteID, int VoteID2, int Get);
 
-	/* ==========================================================
-		FUNCTIONS PLAYER ITEMS
-	========================================================== */
-	class CPlayerItem* GetItem(const CItem& Item) { return GetItem(Item.GetID()); }
-	virtual class CPlayerItem* GetItem(ItemIdentifier ID);
-	class CSkill* GetSkill(SkillIdentifier ID);
-	class CPlayerQuest* GetQuest(QuestIdentifier ID);
+	CPlayerItem* GetItem(const CItem& Item) { return GetItem(Item.GetID()); }
+	virtual CPlayerItem* GetItem(ItemIdentifier ID);
+	CSkill* GetSkill(int SkillID) const;
+	CPlayerQuest* GetQuest(QuestIdentifier ID) const;
 	CAccountTempData& GetTempData() const { return CAccountTempData::ms_aPlayerTempData[m_ClientID]; }
-	CAccountData& Acc() const { return CAccountData::ms_aData[m_ClientID]; }
+	CAccountData* Account() const { return &CAccountData::ms_aData[m_ClientID]; }
 
-	int GetTypeAttributesSize(AttributeType Type);
-	int GetAttributesSize();
+	int GetTotalAttributesInGroup(AttributeGroup Type) const;
+	int GetTotalAttributes() const;
 
 	void SetSnapHealthTick(int Sec);
+	bool IsSameMotdMenu(int Menulist) const { return m_pMotdMenu && m_pMotdMenu->GetMenulist() == Menulist; }
+	void CloseMotdMenu() { m_pMotdMenu->ClearMotd(); }
 
-	virtual Mood GetMoodState() const { return Mood::NORMAL; }
-	void ChangeWorld(int WorldID);
-
-	/* ==========================================================
-	   VOTING OPTIONAL EVENT
-	========================================================== */
-	// Function: CreateVoteOptional
-	// Parameters:
-	//    - OptionID: an integer value representing the vote option
-	//    - OptionID2: an integer value representing the vote option
-	//    - Sec: an integer value representing the duration of the vote event
-	//    - pInformation: a pointer to a character array containing optional information for the vote
-	//    - ...: additional optional arguments for the information text format
-	// Return:
-	//    - a pointer to a CVoteEventOptional object representing the created vote event
-	CVoteEventOptional* CreateVoteOptional(int OptionID, int OptionID2, int Sec, const char* pInformation, ...);
-
-private:
-	inline static std::queue<CVoteEventOptional> m_Optionals {};
-
-	// Function: RunEventOptional
-	// Parameters:
-	//    - Option: an integer value representing the selected option for the vote event
-	//    - pOptional: a pointer to a CVoteEventOptional object representing the vote event
-	// Description:
-	//    - Runs the selected optional vote event
-	void RunEventOptional(int Option, CVoteEventOptional* pOptional);
-
-	// Function: HandleVoteOptionals
-	// Description:
-	//    - Handles all the optional vote events
-	void HandleVoteOptionals();
+	void ChangeWorld(int WorldID, std::optional<vec2> newWorldPosition = std::nullopt) const;
+	void StartUniversalScenario(const std::string& ScenarioData, int ScenarioID);
 };
 
 #endif

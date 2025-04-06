@@ -6,68 +6,70 @@
 #include "gamecontext.h"
 
 #include "entities/pickup.h"
-#include "mmocore/GameEntities/npcwall.h"
+#include "core/entities/logic/botwall.h"
+#include "core/entities/items/gathering_node.h"
+
+#include "core/components/achievements/achievement_data.h"
+#include "core/components/guilds/guild_manager.h"
+#include "core/components/houses/house_manager.h"
+
+#include "entities/character_bot.h"
 
 /*
 	Here you need to put it in order make more events
 	For modes that each map can have one of them
 */
 
-IGameController::IGameController(CGS *pGS)
+IGameController::IGameController(CGS* pGS)
 {
 	m_pGS = pGS;
 	m_GameFlags = 0;
 	m_pServer = m_pGS->Server();
-
-	for(int i = 0; i < SPAWN_NUM; i++)
-		m_aNumSpawnPoints[i] = 0;
 }
 
 void IGameController::OnCharacterDamage(CPlayer* pFrom, CPlayer* pTo, int Damage)
 {
+	g_EventListenerManager.Notify<IEventListener::CharacterDamage>(pFrom, pTo, Damage);
 }
 
-void IGameController::OnCharacterDeath(CCharacter *pVictim, CPlayer *pKiller, int Weapon)
+void IGameController::OnCharacterDeath(CPlayer* pVictim, CPlayer* pKiller, int Weapon)
 {
-	// eidolons
-	pVictim->GetPlayer()->TryRemoveEidolon();
+	g_EventListenerManager.Notify<IEventListener::Type::CharacterDeath>(pVictim, pKiller, Weapon);
+
+	// update rating
+	if(pVictim && pKiller && pVictim != pKiller && !pVictim->IsBot() && !pKiller->IsBot())
+	{
+		auto& pKillerRating = pKiller->Account()->GetRatingSystem();
+		auto& pVictimRating = pVictim->Account()->GetRatingSystem();
+		pKillerRating.UpdateRating(GS(), true, pVictim->Account());
+		pVictimRating.UpdateRating(GS(), false, pKiller->Account());
+	}
+
+	// update last killed by weapon
+	if(pVictim && !pVictim->IsBot())
+	{
+		pVictim->TryRemoveEidolon();
+		pVictim->GetTempData().m_LastKilledByWeapon = Weapon;
+
+		// Clear all effects on the player
+		if(Weapon != WEAPON_WORLD)
+		{
+			pVictim->m_Effects.RemoveAll();
+			pVictim->UpdateTempData(0, 0);
+		}
+	}
 }
 
 bool IGameController::OnCharacterSpawn(CCharacter* pChr)
 {
-	// if we spawn the bot
-	if(pChr->GetPlayer()->IsBot())
-	{
-		pChr->IncreaseHealth(pChr->GetPlayer()->GetStartHealth());
-		pChr->GiveWeapon(WEAPON_HAMMER, -1);
-		for(int i = WEAPON_GUN; i < NUM_WEAPONS-1; i++)
-			pChr->GiveWeapon(i, 10);
-		return true;
-	}
+	g_EventListenerManager.Notify<IEventListener::Type::CharacterSpawn>(pChr->GetPlayer());
 
 	// Health
-	int StartHealth = pChr->GetPlayer()->GetStartHealth();
-	if(!GS()->IsDungeon())
-	{
-		if(pChr->GetPlayer()->GetHealth() > 0)
-			StartHealth = pChr->GetPlayer()->GetHealth();
-		else if(pChr->GetPlayer()->GetTempData().m_TempSafeSpawn == true)
-		{
-			pChr->GetPlayer()->GetTempData().m_TempSafeSpawn = false;
-			StartHealth /= 2;
-		}
-	}
-	pChr->IncreaseHealth(StartHealth);
-
-	// Mana
-	if(pChr->GetPlayer()->GetMana() > 0)
-	{
-		const int StartMana = pChr->GetPlayer()->GetMana();
-		pChr->IncreaseMana(StartMana);
-	}
+	pChr->IncreaseHealth(pChr->GetPlayer()->GetMaxHealth());
+	pChr->IncreaseMana(3);
 
 	// Weapons
-	const int MaximumAmmo = 10 + pChr->GetPlayer()->GetAttributeSize(AttributeIdentifier::Ammo);
+	const int MaximumAmmo = 10 + pChr->GetPlayer()->GetTotalAttributeValue(AttributeIdentifier::Ammo);
 	pChr->GiveWeapon(WEAPON_HAMMER, -1);
 	for(int i = WEAPON_GUN; i < NUM_WEAPONS - 1; i++)
 		pChr->GiveWeapon(i, MaximumAmmo);
@@ -77,79 +79,155 @@ bool IGameController::OnCharacterSpawn(CCharacter* pChr)
 	return true;
 }
 
-bool IGameController::OnEntity(int Index, vec2 Pos)
+bool IGameController::OnCharacterBotSpawn(CCharacterBotAI* pChr)
 {
-	int Type = -1;
-	int SubType = 0;
-	switch(Index)
-	{
-	case ENTITY_SPAWN:
-		m_aaSpawnPoints[SPAWN_HUMAN][m_aNumSpawnPoints[SPAWN_HUMAN]++] = Pos;
-		break;
-	case ENTITY_SPAWN_MOBS:
-		m_aaSpawnPoints[SPAWN_BOT][m_aNumSpawnPoints[SPAWN_BOT]++] = Pos;
-		break;
-	case ENTITY_SPAWN_SAFE:
-		m_aaSpawnPoints[SPAWN_HUMAN_SAFE][m_aNumSpawnPoints[SPAWN_HUMAN_SAFE]++] = Pos;
-		break;
-	case ENTITY_ARMOR_1:
-		Type = POWERUP_ARMOR;
-		break;
-	case ENTITY_HEALTH_1:
-		Type = POWERUP_HEALTH;
-		break;
-	case ENTITY_PICKUP_SHOTGUN:
-		Type = POWERUP_WEAPON;
-		SubType = WEAPON_SHOTGUN;
-		break;
-	case ENTITY_PICKUP_GRENADE:
-		Type = POWERUP_WEAPON;
-		SubType = WEAPON_GRENADE;
-		break;
-	case ENTITY_PICKUP_LASER:
-		Type = POWERUP_WEAPON;
-		SubType = WEAPON_LASER;
-		break;
-	default: break;
-	}
+	auto* pPlayerBot = dynamic_cast<CPlayerBot*>(pChr->GetPlayer());
 
-	if(Type != -1)
-	{
-		new CPickup(&GS()->m_World, Type, SubType, Pos);
-		return true;
-	}
+	const int MaxStartHP = pPlayerBot->GetTotalAttributeValue(AttributeIdentifier::HP);
+	const int MaxStartMP = pPlayerBot->GetTotalAttributeValue(AttributeIdentifier::MP);
+	pPlayerBot->InitBasicStats(MaxStartHP, MaxStartMP, MaxStartHP, MaxStartMP);
 
-	// BOT'S WALLS
-	if(Index == ENTITY_NPC_WALLUP)
-	{
-		new CNPCWall(&GS()->m_World, Pos, false, CNPCWall::Flags::FRIENDLY_BOT);
-		return true;
-	}
+	pChr->IncreaseHealth(MaxStartHP);
+	pChr->IncreaseMana(MaxStartMP);
+	pChr->GiveWeapon(WEAPON_HAMMER, -1);
 
-	if(Index == ENTITY_NPC_WALLLEFT)
-	{
-		new CNPCWall(&GS()->m_World, Pos, true, CNPCWall::Flags::FRIENDLY_BOT);
-		return true;
-	}
-	if(Index == ENTITY_MOB_WALLUP)
-	{
-		new CNPCWall(&GS()->m_World, Pos, false, CNPCWall::Flags::AGRESSED_BOT);
-		return true;
-	}
-	if(Index == ENTITY_MOB_WALLLEFT)
-	{
-		new CNPCWall(&GS()->m_World, Pos, true, CNPCWall::Flags::AGRESSED_BOT);
-		return true;
-	}
+	for(int i = WEAPON_GUN; i < WEAPON_LASER; i++)
+		pChr->GiveWeapon(i, 10);
 
-
-	return false;
+	return true;
 }
 
-void IGameController::OnPlayerConnect(CPlayer *pPlayer)
+void IGameController::OnEntity(int Index, vec2 Pos, int Flags)
+{
+	if(Index == ENTITY_SPAWN)
+	{
+		m_aaSpawnPoints[SPAWN_HUMAN].push_back(Pos);
+	}
+
+	else if(Index == ENTITY_SPAWN_MOBS)
+	{
+		m_aaSpawnPoints[SPAWN_BOT].push_back(Pos);
+	}
+
+	else if(Index == ENTITY_SPAWN_PRISON)
+	{
+		m_aaSpawnPoints[SPAWN_HUMAN_PRISON].push_back(Pos);
+	}
+
+	else if(Index == ENTITY_ARMOR_1)
+	{
+		new CPickup(&GS()->m_World, POWERUP_ARMOR, 0, Pos);
+	}
+
+	else if(Index == ENTITY_HEALTH_1)
+	{
+		new CPickup(&GS()->m_World, POWERUP_HEALTH, 0, Pos);
+	}
+
+	else if(Index == ENTITY_PICKUP_SHOTGUN)
+	{
+		new CPickup(&GS()->m_World, POWERUP_WEAPON, WEAPON_SHOTGUN, Pos);
+	}
+
+	else if(Index == ENTITY_PICKUP_GRENADE)
+	{
+		new CPickup(&GS()->m_World, POWERUP_WEAPON, WEAPON_GRENADE, Pos);
+	}
+
+	else if(Index == ENTITY_PICKUP_LASER)
+	{
+		new CPickup(&GS()->m_World, POWERUP_WEAPON, WEAPON_LASER, Pos);
+	}
+
+	else if(Index == ENTITY_NPC_WALL)
+	{
+		vec2 Direction = GS()->Collision()->GetRotateDirByFlags(Flags);
+		new CBotWall(&GS()->m_World, Pos, Direction, CBotWall::Flags::WALLLINEFLAG_FRIENDLY_BOT);
+	}
+
+	else if(Index == ENTITY_MOB_WALL)
+	{
+		vec2 Direction = GS()->Collision()->GetRotateDirByFlags(Flags);
+		new CBotWall(&GS()->m_World, Pos, Direction, CBotWall::Flags::WALLLINEFLAG_AGRESSED_BOT);
+	}
+
+	else if(Index == ENTITY_PLANT)
+	{
+		const auto roundPos = vec2(round_to_int(Pos.x) / 32 * 32, round_to_int(Pos.y) / 32 * 32);
+		const auto range = 16.f / (float)g_Config.m_SvGatheringEntitiesPerTile;
+		const auto multiplier = range * 2;
+
+		// entity farming point
+		for(int i = 0; i < g_Config.m_SvGatheringEntitiesPerTile; i++)
+		{
+			const float offset = range + i * multiplier;
+			auto newPos = vec2(roundPos.x + offset, Pos.y);
+
+			// handle collision flags to adjust the position
+			if(GS()->Collision()->GetCollisionFlagsAt(roundPos.x - range, Pos.y) ||
+				GS()->Collision()->GetCollisionFlagsAt(roundPos.x + (30.f + range), Pos.y))
+			{
+				newPos = vec2(Pos.x, roundPos.y + offset);
+			}
+
+			// try create guild house plant
+			if(auto* pFarmzone = GS()->Core()->GuildManager()->GetHouseFarmzoneByPos(newPos))
+				pFarmzone->Add(GS(), newPos);
+
+			// try create house plant
+			if(auto* pFarmzone = GS()->Core()->HouseManager()->GetHouseFarmzoneByPos(newPos))
+				pFarmzone->Add(GS(), newPos);
+		}
+	}
+}
+
+void IGameController::OnEntitySwitch(int Index, vec2 Pos, int Flags, int Number)
+{
+	if(Index == ENTITY_PLANT || Index == ENTITY_ORE)
+	{
+		const auto roundPos = vec2(round_to_int(Pos.x) / 32 * 32, round_to_int(Pos.y) / 32 * 32);
+		const auto range = 16.f / (float)g_Config.m_SvGatheringEntitiesPerTile;
+		const auto multiplier = range * 2;
+
+		// initialize gathering node and type
+		GatheringNode* pNode = nullptr;
+		int nodeType = 0;
+		if(Index == ENTITY_ORE)
+		{
+			pNode = GS()->Collision()->GetOreNode(Number);
+			nodeType = CEntityGatheringNode::GATHERING_NODE_ORE;
+		}
+		else if(Index == ENTITY_PLANT)
+		{
+			pNode = GS()->Collision()->GetPlantNode(Number);
+			nodeType = CEntityGatheringNode::GATHERING_NODE_PLANT;
+		}
+
+		// create entities for node
+		if(pNode)
+		{
+			for(int i = 0; i < g_Config.m_SvGatheringEntitiesPerTile; i++)
+			{
+				const float offset = range + i * multiplier;
+				auto newPos = vec2(roundPos.x + offset, Pos.y);
+
+				// handle collision flags to adjust the position
+				if(GS()->Collision()->GetCollisionFlagsAt(roundPos.x - range, Pos.y) ||
+					GS()->Collision()->GetCollisionFlagsAt(roundPos.x + (30.f + range), Pos.y))
+				{
+					newPos = vec2(Pos.x, roundPos.y + offset);
+				}
+
+				new CEntityGatheringNode(&GS()->m_World, pNode, newPos, nodeType);
+			}
+		}
+	}
+}
+
+void IGameController::OnPlayerConnect(CPlayer* pPlayer)
 {
 	const int ClientID = pPlayer->GetCID();
-	if(Server()->ClientIngame(ClientID) && pPlayer->GetPlayerWorldID() == GS()->GetWorldID())
+	if(Server()->ClientIngame(ClientID) && pPlayer->GetCurrentWorldID() == GS()->GetWorldID())
 	{
 		char aBuf[128];
 		str_format(aBuf, sizeof(aBuf), "team_join player='%d:%s' team=%d", ClientID, Server()->ClientName(ClientID), pPlayer->GetTeam());
@@ -158,29 +236,18 @@ void IGameController::OnPlayerConnect(CPlayer *pPlayer)
 	}
 }
 
-void IGameController::OnPlayerDisconnect(CPlayer *pPlayer)
+void IGameController::OnPlayerDisconnect(CPlayer* pPlayer)
 {
 	const int ClientID = pPlayer->GetCID();
-	if(Server()->ClientIngame(ClientID) && pPlayer->GetPlayerWorldID() == GS()->GetWorldID())
+	if(Server()->ClientIngame(ClientID) && pPlayer->GetCurrentWorldID() == GS()->GetWorldID())
 	{
 		char aBuf[128];
 		str_format(aBuf, sizeof(aBuf), "leave player='%d:%s'", ClientID, Server()->ClientName(ClientID));
 		GS()->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "game", aBuf);
-		GS()->Mmo()->SaveAccount(pPlayer, SaveType::SAVE_POSITION);
+		GS()->Core()->SaveAccount(pPlayer, SAVE_POSITION);
 	}
 
 	pPlayer->OnDisconnect();
-}
-
-void IGameController::OnPlayerInfoChange(CPlayer *pPlayer, int WorldID) {}
-
-void IGameController::OnReset()
-{
-	for(int i = 0; i < MAX_CLIENTS; i++)
-	{
-		if(GS()->m_apPlayers[i])
-			GS()->m_apPlayers[i]->m_aPlayerTick[TickState::Respawn] = Server()->Tick()+Server()->TickSpeed()/2;
-	}
 }
 
 // general
@@ -188,12 +255,12 @@ void IGameController::Snap()
 {
 	// vanilla snap
 	CNetObj_GameInfo* pGameInfoObj = (CNetObj_GameInfo*)Server()->SnapNewItem(NETOBJTYPE_GAMEINFO, 0, sizeof(CNetObj_GameInfo));
-	if (!pGameInfoObj)
+	if(!pGameInfoObj)
 		return;
 
 	pGameInfoObj->m_GameFlags = m_GameFlags;
 	pGameInfoObj->m_GameStateFlags = 0;
-	pGameInfoObj->m_RoundStartTick = Server()->GetOffsetWorldTime();
+	pGameInfoObj->m_RoundStartTick = Server()->GetOffsetGameTime();
 	pGameInfoObj->m_WarmupTimer = 0;
 	pGameInfoObj->m_RoundNum = 0;
 	pGameInfoObj->m_RoundCurrent = 1;
@@ -212,119 +279,109 @@ void IGameController::Tick() { }
 
 void IGameController::UpdateGameInfo(int ClientID)
 {
-/*	CNetMsg_Sv_GameInfo GameInfoMsg;
-	GameInfoMsg.m_GameFlags = m_GameFlags;
-	GameInfoMsg.m_ScoreLimit = 0;
-	GameInfoMsg.m_TimeLimit = 0;
-	GameInfoMsg.m_MatchNum = 0;
-	GameInfoMsg.m_MatchCurrent = 0;
+	/*	CNetMsg_Sv_GameInfo GameInfoMsg;
+		GameInfoMsg.m_GameFlags = m_GameFlags;
+		GameInfoMsg.m_ScoreLimit = 0;
+		GameInfoMsg.m_TimeLimit = 0;
+		GameInfoMsg.m_MatchNum = 0;
+		GameInfoMsg.m_MatchCurrent = 0;
 
-	if(ClientID == -1)
-	{
-		for(int i = 0; i < MAX_PLAYERS; ++i)
+		if(ClientID == -1)
 		{
-			if(!GS()->m_apPlayers[i] || !Server()->ClientIngame(i))
-				continue;
+			for(int i = 0; i < MAX_PLAYERS; ++i)
+			{
+				if(!GS()->m_apPlayers[i] || !Server()->ClientIngame(i))
+					continue;
 
-			if((!GS()->IsMmoClient(i) && Server()->GetClientProtocolVersion(i) < MIN_RACE_CLIENTVERSION))
+				if((!GS()->IsMmoClient(i) && Server()->GetClientProtocolVersion(i) < MIN_RACE_CLIENTVERSION))
+					GameInfoMsg.m_GameFlags &= ~GAMEFLAG_RACE;
+
+				Server()->SendPackMsg(&GameInfoMsg, MSGFLAG_VITAL|MSGFLAG_NORECORD, i, Server()->GetClientWorldID(ClientID));
+			}
+		}
+		else
+		{
+			if((!GS()->IsMmoClient(ClientID) && Server()->GetClientProtocolVersion(ClientID) < MIN_RACE_CLIENTVERSION))
 				GameInfoMsg.m_GameFlags &= ~GAMEFLAG_RACE;
 
-			Server()->SendPackMsg(&GameInfoMsg, MSGFLAG_VITAL|MSGFLAG_NORECORD, i, Server()->GetClientWorldID(ClientID));
-		}
-	}
-	else
-	{
-		if((!GS()->IsMmoClient(ClientID) && Server()->GetClientProtocolVersion(ClientID) < MIN_RACE_CLIENTVERSION))
-			GameInfoMsg.m_GameFlags &= ~GAMEFLAG_RACE;
-
-		Server()->SendPackMsg(&GameInfoMsg, MSGFLAG_VITAL|MSGFLAG_NORECORD, ClientID, Server()->GetClientWorldID(ClientID));
-	}*/
+			Server()->SendPackMsg(&GameInfoMsg, MSGFLAG_VITAL|MSGFLAG_NORECORD, ClientID, Server()->GetClientWorldID(ClientID));
+		}*/
 }
 
-bool IGameController::CanSpawn(int SpawnType, vec2 *pOutPos, std::pair<vec2, float> LimiterSpread) const
+bool IGameController::CanSpawn(int SpawnType, vec2* pOutPos, std::pair<vec2, float> LimiterSpread) const
 {
-	if(SpawnType < SPAWN_HUMAN || SpawnType >= SPAWN_NUM)
+	if(SpawnType < SPAWN_HUMAN || SpawnType >= NUM_SPAWN)
 		return false;
 
 	CSpawnEval Eval;
 	EvaluateSpawnType(&Eval, SpawnType, LimiterSpread);
-
 	*pOutPos = Eval.m_Pos;
 	return Eval.m_Got;
 }
 
-float IGameController::EvaluateSpawnPos(CSpawnEval *pEval, vec2 Pos) const
+void IGameController::EvaluateSpawnType(CSpawnEval* pEval, int SpawnType, std::pair<vec2, float> LimiterSpread) const
 {
-	float Score = 0.0f;
-	for(const CCharacter *pC = dynamic_cast<CCharacter *>(GS()->m_World.FindFirst(CGameWorld::ENTTYPE_CHARACTER)); pC; pC = (CCharacter *)pC->TypeNext())
+	for(auto& currentPos : m_aaSpawnPoints[SpawnType])
 	{
-		// team mates are not as dangerous as enemies
-		float Scoremod = 1.0f;
-		if(pEval->m_FriendlyTeam != -1 && pC->GetPlayer()->GetTeam() == pEval->m_FriendlyTeam)
-			Scoremod = 0.5f;
+		if(LimiterSpread.second >= 1.f)
+		{
+			if(distance(LimiterSpread.first, currentPos) > LimiterSpread.second)
+				continue;
+		}
 
-		const float d = distance(Pos, pC->GetPos());
-		Score += Scoremod * (d == 0.f ? 1000000000.0f : 1.0f/d);
-	}
+		CCharacter* aEnts[MAX_CLIENTS];
+		int Num = GS()->m_World.FindEntities(currentPos, 64, (CEntity**)aEnts, MAX_CLIENTS, CGameWorld::ENTTYPE_CHARACTER);
+		const vec2 Positions[5] = {
+			vec2(0.0f, 0.0f),
+			vec2(-32.0f, 0.0f),
+			vec2(0.0f, -32.0f),
+			vec2(32.0f, 0.0f),
+			vec2(0.0f, 32.0f)
+		};
 
-	return Score;
-}
-
-void IGameController::EvaluateSpawnType(CSpawnEval *pEval, int SpawnType, std::pair<vec2, float> LimiterSpread) const
-{
-	// get spawn point
-	for(int i = 0; i < m_aNumSpawnPoints[SpawnType]; i++)
-	{
-		// check if the position is occupado
-		CCharacter *aEnts[MAX_CLIENTS];
-		int Num = GS()->m_World.FindEntities(m_aaSpawnPoints[SpawnType][i], 64, (CEntity**)aEnts, MAX_CLIENTS, CGameWorld::ENTTYPE_CHARACTER);
-		vec2 Positions[5] = { vec2(0.0f, 0.0f), vec2(-32.0f, 0.0f), vec2(0.0f, -32.0f), vec2(32.0f, 0.0f), vec2(0.0f, 32.0f) };
 		int Result = -1;
-
-		if(LimiterSpread.second >= 1.f && distance(LimiterSpread.first, m_aaSpawnPoints[SpawnType][i]) > LimiterSpread.second)
-			continue;
-
 		for(int Index = 0; Index < 5 && Result == -1; ++Index)
 		{
-			Result = Index;
+			vec2 spawnPos = currentPos + Positions[Index];
+			bool isValid = true;
+
 			for(int c = 0; c < Num; ++c)
 			{
-				if(
-					GS()->Collision()->CheckPoint(m_aaSpawnPoints[SpawnType][i]+Positions[Index]) ||
-					distance(aEnts[c]->GetPos(), m_aaSpawnPoints[SpawnType][i]+Positions[Index]) <= aEnts[c]->GetProximityRadius())
+				if(GS()->Collision()->CheckPoint(spawnPos) ||
+					distance(aEnts[c]->GetPos(), spawnPos) <= aEnts[c]->GetRadius())
 				{
-					Result = -1;
+					isValid = false;
 					break;
 				}
 			}
-		}
-		if(Result == -1)
-			continue; // try next spawn point
 
-		const vec2 P = m_aaSpawnPoints[SpawnType][i]+Positions[Result];
-		const float S = EvaluateSpawnPos(pEval, P);
-		if(!pEval->m_Got || pEval->m_Score > S)
+			if(isValid)
+			{
+				Result = Index;
+			}
+		}
+
+		if(Result == -1)
+			continue;
+
+		const vec2 spawnPos = currentPos + Positions[Result];
+		if(!pEval->m_Got)
 		{
 			pEval->m_Got = true;
-			pEval->m_Score = S;
-			pEval->m_Pos = P;
+			pEval->m_Pos = spawnPos;
 		}
 	}
 }
 
-void IGameController::DoTeamChange(CPlayer *pPlayer, bool DoChatMsg)
+void IGameController::DoTeamChange(CPlayer* pPlayer)
 {
 	const int ClientID = pPlayer->GetCID();
-	const int Team = pPlayer->GetStartTeam();
-	if(Team == pPlayer->GetTeam())
-		return;
+	const int Team = pPlayer->GetTeam();
 
-	pPlayer->Acc().m_Team = Team;
+	pPlayer->GetTempData().m_LastKilledByWeapon = WEAPON_WORLD;
 
 	char aBuf[128];
 	str_format(aBuf, sizeof(aBuf), "team_join player='%d:%s' m_Team=%d", ClientID, Server()->ClientName(ClientID), Team);
 	GS()->Console()->Print(IConsole::OUTPUT_LEVEL_DEBUG, "game", aBuf);
-	OnPlayerInfoChange(pPlayer, GS()->GetWorldID());
-
 	Server()->ExpireServerInfo();
 }

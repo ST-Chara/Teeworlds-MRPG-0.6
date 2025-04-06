@@ -1,17 +1,457 @@
-[
-	{"type": 10, "info": "Talk to your instructor, and accept your first quest.\n\nUse 'Hammer Fire' - to start a dialog.\nUse 'F4 (Vote NO)' - to communicate during a dialog.", "integer": 1 },
-	{"type": 6, "info": "Use the arrows on your keyboard to go down.", "posX": 679, "posY": 2577 },	
-	{"type": 6, "info": "Use the jump to get past the obstacles.", "posX": 5558, "posY": 1452 },
-	{"type": 6, "info": "Keep moving forward, you're doing well!", "posX": 8260, "posY": 1169 },
-	{"type": 6, "info": "Now combine movement and the use of jumps.", "posX": 12279, "posY": 1777 },
-	{"type": 6, "info": "Now let's try use the hook.", "posX": 17100, "posY": 2069 },
-	{"type": 6, "info": "Now let's complicate things a bit with the hook.", "posX": 18884, "posY": 1037 },
-	{"type": 6, "info": "Move to the right side.", "posX": 21911, "posY": 2692 },
-	{"type": 6, "info": "And now all together!", "posX": 25617, "posY": 2180 },
-	{"type": 6, "info": "Move to the right side.", "posX": 28420, "posY": 2017 },
-	{"type": 8, "info": "Press TAB. Look at the list of players.", "integer": 8 },
-	{"type": 8, "info": "Using ESC. Open the menu.", "integer": 2 },
-	{"type": 9, "info": "Select the 'Call vote' tab.\nAfter select tab 'Settings' from the menu.\n\nThere you can find the basic settings of the player.\nAnd also the setting of modules on the character", "integer": 6 },
-	{"type": 9, "info": "Press 'Backpage'. To go back to the menu selection.", "integer": 1 },
-	{"type": 11, "info": "Talk to an NPC. And complete your first quest!\n\nUse 'Hammer Fire' - to start a dialog.\nUse 'F4 (Vote NO)' - to communicate during a dialog.", "integer": 1 }
-] 
+{
+  "steps": [
+	{
+		"action": "new_door",
+		"key": "door_1_1",
+		"position": {
+			"x": 1049.0,
+			"y": 1009.0
+		}
+	},
+	{
+		"action": "message",
+		"delay": 200,
+		"broadcast": "This tutorial will help you get familiar with the world of MMORPG\nand introduce you to the basics of the game.",
+		"chat": "Start with an exciting tutorial and complete your first quest. Ready for the adventure?"
+    },	
+	{
+		"action": "message",
+		"delay": 150,
+		"broadcast": "Let's start by going through the introductory course."
+    },	
+	{
+		"action": "message",
+		"delay": 400,
+		"broadcast": "Pay attention to what I will write to you.\nSoon, a door will open before you, leading to a new training area."
+    },
+	{
+		"action": "message",
+		"chat": "A door has opened before you, proceed to the new area."
+    },
+	{
+		"action": "remove_door",
+		"key": "door_1_1"
+	},
+	
+	
+	
+	
+	{
+		"action": "new_door",
+		"key": "door_1_2",
+		"position": {
+			"x": 2016.0,
+			"y": 768.0
+		}
+	},
+	{
+		"action": "movement_task",
+		"delay": 150,
+		"position": {
+			"x": 1632.0,
+			"y": 960.0
+		},
+		"broadcast": "Reach the specified point.",
+		"target_lock_text": "Head over here to continue.",
+		"target_look": true
+	},
+	{
+		"action": "message",
+		"delay": 400,
+		"broadcast": "The map may contain various objects: blocks, platforms,\nchests, NPCs (non-player characters), and much more.\nThere are no specific goals, offering endless gameplay.",
+		"chat": "Read carefully — it will help you dive into the gameplay more quickly."
+	},	
+	{
+		"action": "remove_door",
+		"key": "door_1_2"
+	},
+	
+	
+	
+	{
+		"action": "movement_task",
+		"delay": 150,
+		"position": {
+			"x": 2624.0,
+			"y": 864.0
+		},
+		"broadcast": "Reach the specified point.",
+		"target_lock_text": "Head over here to continue.",
+		"target_look": true
+	},
+	{
+		"action": "message",
+		"delay": 250,
+		"broadcast": "The interface contains important information.",
+		"chat": "In the voting list, you can control your character, interact with the inventory, adjust attributes, and much more."
+	},
+	{
+		"action": "message",
+		"delay": 250,
+		"chat": "On the left, all your stats are displayed for easier gameplay. At the bottom, you'll also find information during battles. Pay attention to this."
+	},
+	{
+		"action": "message",
+		"delay": 250,
+		"broadcast": "The interface contains important information.",
+		"chat": "There are also in-game chat commands that you can explore by using '/cmdlist'."
+	},	
+	{
+		"action": "message",
+		"chat": "I also recommend reviewing the rules by using the '/rules' command."
+	},
+	{
+		"action": "use_chat_task",
+		"chat": "/rules"
+	},
+	{
+		"action": "message",
+		"delay": 500,
+		"broadcast": "While you're reading the rules,\nI'll prepare the next training area for you."
+	},	
+	{
+		"action": "teleport",
+		"position": {
+			"x": 267.0,
+			"y": 1594.0
+		}
+	},
+	
+	{
+		"action": "new_door",
+		"key": "door_2_1",
+		"position": {
+			"x": 856.0,
+			"y": 1777.0
+		}
+	},
+	{
+		"action": "message",
+		"delay": 150,
+		"broadcast": "I'm sure you won't have any trouble with movement."
+	},	
+	{
+		"action": "message",
+		"delay": 200,
+		"broadcast": "This features the minimum difficulty level for playing an MMORPG."
+	},
+	{
+		"action": "remove_door",
+		"key": "door_2_1"
+	},	
+	{
+		"action": "new_door",
+		"key": "door_2_2",
+		"position": {
+			"x": 1329.0,
+			"y": 1777.0
+		}
+	},	
+	{
+		"action": "message",
+		"chat": "Let's start by learning double jumps."
+	},
+	{
+		"action": "movement_task",
+		"delay": 150,
+		"position": {
+			"x": 1267.0,
+			"y": 1777.0
+		},
+		"broadcast": "Reach the specified point.",
+		"target_lock_text": "Head over here to continue.",
+		"target_look": true
+	},
+	{
+		"action": "remove_door",
+		"key": "door_2_2"
+	},
+	{
+		"action": "new_door",
+		"key": "door_2_3",
+		"position": {
+			"x": 1696.0,
+			"y": 1169.0
+		}
+	},
+	{
+		"action": "message",
+		"chat": "Let's try to overcome this obstacle."
+	},
+	{
+		"action": "movement_task",
+		"delay": 150,
+		"position": {
+			"x": 1502.0,
+			"y": 1169.0
+		},
+		"broadcast": "Reach the specified point.",
+		"target_lock_text": "Head over here to continue.",
+		"target_look": true
+	},	
+	{
+		"action": "pick_item_task",
+		"position": {
+			"x": 1622.0,
+			"y": 1169.0
+		},
+		"item": {
+			"id": 3,
+			"value": 1
+		},
+		"broadcast": "Pick up the item that appeared nearby by using\nthe hammer strike!"
+	},
+	{
+		"action": "remove_door",
+		"key": "door_2_3"
+	},	
+	{
+		"action": "new_door",
+		"key": "door_2_4",
+		"position": {
+			"x": 2440.0,
+			"y": 1777.0
+		}
+	},
+	{
+		"action": "message",
+		"chat": "Let's practice our shooting skills."
+	},
+	{
+		"action": "shootmarkers",
+		"markers":[
+			{
+				"position": { "x": 2127.0, "y": 1165.0 },
+				"health": 3
+			},
+			{
+				"position": { "x": 2304.0, "y": 1357.0 },
+				"health": 3
+			},
+			{
+				"position": { "x": 2531.0, "y": 1470.0 },
+				"health": 3
+			},
+			{
+				"position": { "x": 1713.0, "y": 1655.0 },
+				"health": 3
+			}
+		]
+	},
+	{
+		"action": "remove_door",
+		"key": "door_2_4"
+	},
+	{
+		"action": "movement_task",
+		"delay": 150,
+		"position": {
+			"x": 3089.0,
+			"y": 1777.0
+		},
+		"broadcast": "Reach the specified point.",
+		"target_lock_text": "Head over here to continue.",
+		"target_look": true
+	},	
+	{
+		"action": "message",
+		"chat": "Let's test your accuracy one last time."
+	},
+	{
+		"action": "shootmarkers",
+		"markers":[
+			{
+				"position": { "x": 2852.0, "y": 1405.0 },
+				"health": 3
+			},
+			{
+				"position": { "x": 3008.0, "y": 1405.0 },
+				"health": 3
+			},
+			{
+				"position": { "x": 3165.0, "y": 1405.0 },
+				"health": 3
+			},
+			{
+				"position": { "x": 3333.0, "y": 1405.0 },
+				"health": 3
+			}
+		]
+	},
+	{
+		"action": "message",
+		"delay": 200,
+		"broadcast": "Congratulations, you've mastered the basic movement elements."
+	},
+	{
+		"action": "message",
+		"delay": 500,
+		"broadcast": "I'm preparing a new training area for you."
+	},
+	    {
+      "action": "reset_quest",
+      "quest_id": 1
+    },
+	
+	{
+		"action": "new_door",
+		"key": "door_3_1",
+		"position": {
+			"x": 910.0,
+			"y": 2193.0
+		}
+	},
+	{
+		"action": "new_door",
+		"key": "door_3_2",
+		"position": {
+			"x": 2996.0,
+			"y": 2225.0
+		}
+	},
+	{
+		"action": "teleport",
+		"position": {
+			"x": 264.0,
+			"y": 2001.0
+		}
+	},
+	{
+		"action": "message",
+		"delay": 500,
+		"broadcast": "Now, let's explore the classics of MMORPG.\nI'm preparing a quest for you."
+	},
+	{
+		"action": "accept_quest",
+		"quest_id": 1
+	},
+	{
+		"action": "message",
+		"chat": "Reach the NPC (non-player character)."
+	},
+	{
+		"action": "fix_cam",
+		"delay": 150,
+		"position": {
+			"x": 810.0,
+			"y": 2193.0
+		}
+	},
+	{
+		"action": "remove_door",
+		"key": "door_3_1"
+	},
+	{
+		"action": "check_quest_step_finished",
+		"quest_id": 1,
+		"step": 2
+	},
+	{
+		"action": "remove_door",
+		"key": "door_3_2"
+	},
+	{
+		"action": "message",
+		"broadcast": "Your inventory stores all the items you've collected.\nYou can equip, unequip, or discard items.\nSome items can be used by clicking in the voting menu."
+    },
+	{
+		"action": "message",
+		"chat": "These are plantations, which are part of agriculture. Collect one plant!"
+    },
+	{
+		"action": "fix_cam",
+		"delay": 200,
+		"position": {
+			"x": 3510.0,
+			"y": 2257.0
+		}
+	},
+	{
+		"action": "message",
+		"chat": "Hit the hearts with the hammer, and you'll see the plant collection process."
+    },
+	{
+		"action": "check_has_item",
+		"item_id": 40,
+		"required": 1,
+		"show_progress": true
+	},
+	{
+		"action": "message",
+		"chat": "Take them to the house and process them by clicking the appropriate buttons in the voting menu. Click on 'Craft'."
+    },
+	{
+		"action": "movement_task",
+		"delay": 150,
+		"position": {
+			"x": 3774.0,
+			"y": 2193.0
+		},
+		"broadcast": "Reach the specified point.",
+		"target_lock_text": "Head over here to continue.",
+		"target_look": true
+	},
+	{
+		"action": "message",
+		"chat": "Here, you can use the services of the craftsman. Use the collected items to create what is needed to continue."
+    },		
+	{
+		"action": "message",
+		"chat": "To do this, open the voting list in the special zone from the menu and select the required item."
+    },	
+	{
+		"action": "check_has_item",
+		"item_id": 41,
+		"required": 1,
+		"remove": true,
+		"show_progress": true
+	},
+	
+	{
+		"action": "new_door",
+		"key": "door_4_1",
+		"position": {
+			"x": 2966.0,
+			"y": 1201.0
+		}
+	},
+	{
+		"action": "teleport",
+		"position": {
+			"x": 2762.0,
+			"y": 1201.0
+		}
+	},
+	{
+		"action": "message",
+		"delay": 200,
+		"broadcast": "Congratulations on completing the tutorial!"
+    },		
+	{
+		"action": "message",
+		"delay": 200,
+		"broadcast": "I'm sure you've learned something."
+    },
+	{
+		"action": "message",
+		"delay": 100,
+		"broadcast": "Here's a little gift from me."
+    },
+	{
+		"action": "pick_item_task",
+		"position": {
+			"x": 2879.0,
+			"y": 1201.0
+		},
+		"item": {
+			"id": 30,
+			"value": 1
+		},
+		"broadcast": "Pick up the item that appeared nearby by using\nthe hammer strike!"
+	},
+	{
+		"action": "remove_door",
+		"key": "door_4_1"
+	}
+  ]
+}

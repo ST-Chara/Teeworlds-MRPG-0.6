@@ -3,10 +3,9 @@
 #ifndef GAME_VOTING_H
 #define GAME_VOTING_H
 
-#include <functional>
-
 enum
 {
+	VOTE_VANILA_DESC_LENGTH = 64,
 	VOTE_DESC_LENGTH=256,
 	VOTE_CMD_LENGTH=512,
 	VOTE_SEARCH_LENGTH = 64,
@@ -37,15 +36,6 @@ struct CVoteOptionServer
 	CVoteOptionServer *m_pPrev;
 	char m_aDescription[VOTE_DESC_LENGTH];
 	char m_aCommand[1];
-};
-
-class CVoteOptions
-{
-public:
-	char m_aDescription[VOTE_DESC_LENGTH];
-	char m_aCommand[VOTE_CMD_LENGTH];
-	int m_TempID;
-	int m_TempID2;
 };
 
 #endif

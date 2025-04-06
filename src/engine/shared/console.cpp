@@ -18,25 +18,29 @@
 #include <new>
 
 // todo: rework this
+const char* CConsole::CResult::GetString(unsigned Index) const { return GetStringOr(Index, ""); }
+int CConsole::CResult::GetInteger(unsigned Index) const { return GetIntegerOr(Index, 0); }
+float CConsole::CResult::GetFloat(unsigned Index) const { return GetFloatOr(Index, 0.0f); }
 
-const char* CConsole::CResult::GetString(unsigned Index) const
+const char* CConsole::CResult::GetStringOr(unsigned Index, const char* pDefault) const
 {
 	if(Index >= m_NumArgs)
-		return "";
+		return pDefault;
 	return m_apArgs[Index];
 }
 
-int CConsole::CResult::GetInteger(unsigned Index) const
+
+int CConsole::CResult::GetIntegerOr(unsigned Index, int Default) const
 {
 	if(Index >= m_NumArgs)
-		return 0;
+		return Default;
 	return str_toint(m_apArgs[Index]);
 }
 
-float CConsole::CResult::GetFloat(unsigned Index) const
+float CConsole::CResult::GetFloatOr(unsigned Index, float Default) const
 {
 	if(Index >= m_NumArgs)
-		return 0.0f;
+		return Default;
 	return str_tofloat(m_apArgs[Index]);
 }
 
@@ -412,6 +416,31 @@ void CConsole::InitChecksum(CChecksumData* pData) const
 	}
 }
 
+void CConsole::PrintF(int Level, const char* pFrom, const char* pStr, ...)
+{
+	va_list VarArgs;
+	va_start(VarArgs, pStr);
+	LEVEL LogLevel = IConsole::ToLogLevel(Level);
+	log_log_v(LogLevel, pFrom, pStr, VarArgs);
+	va_end(VarArgs);
+}
+
+void CConsole::PrintF(ColorRGBA PrintColor, int Level, const char* pFrom, const char* pStr, ...)
+{
+	va_list VarArgs;
+	va_start(VarArgs, pStr);
+	LEVEL LogLevel = IConsole::ToLogLevel(Level);
+	if(g_Config.m_ConsoleEnableColors && mem_comp(&PrintColor, &gs_ConsoleDefaultColor, sizeof(ColorRGBA)) != 0)
+	{
+		log_log_color_v(LogLevel, ColorToLogColor(PrintColor), pFrom, pStr, VarArgs);
+	}
+	else
+	{
+		log_log_v(LogLevel, pFrom, pStr, VarArgs);
+	}
+	va_end(VarArgs);
+}
+
 int CConsole::ParseCommandArgs(const char* pArgs, const char* pFormat, FCommandCallback pfnCallback, void* pContext)
 {
 	CResult Result;
@@ -728,23 +757,20 @@ bool CConsole::ExecuteFile(const char* pFilename, int ClientID, bool LogFailure,
 	m_pFirstExec = &ThisFile;
 
 	// exec the file
-	IOHANDLE File = m_pStorage->OpenFile(pFilename, IOFLAG_READ | IOFLAG_SKIP_BOM, StorageType);
+	CLineReader LineReader;
 
 	bool Success = false;
 	char aBuf[32 + IO_MAX_PATH_LENGTH];
-	if(File)
+	if(LineReader.OpenFile(m_pStorage->OpenFile(pFilename, IOFLAG_READ, StorageType)))
 	{
 		str_format(aBuf, sizeof(aBuf), "executing '%s'", pFilename);
 		Print(IConsole::OUTPUT_LEVEL_STANDARD, "console", aBuf);
 
-		CLineReader Reader;
-		Reader.Init(File);
-
-		char* pLine;
-		while((pLine = Reader.Get()))
+		while(const char* pLine = LineReader.Get())
+		{
 			ExecuteLine(pLine, ClientID);
+		}
 
-		io_close(File);
 		Success = true;
 	}
 	else if(LogFailure)

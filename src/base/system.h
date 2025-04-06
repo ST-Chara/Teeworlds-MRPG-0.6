@@ -220,7 +220,6 @@ enum
 	IOFLAG_READ = 1,
 	IOFLAG_WRITE = 2,
 	IOFLAG_APPEND = 4,
-	IOFLAG_SKIP_BOM = 8,
 
 	IOSEEK_START = 0,
 	IOSEEK_CUR = 1,
@@ -239,7 +238,7 @@ typedef void *IOHANDLE;
  * @param File to open.
  * @param flags A set of IOFLAG flags.
  *
- * @sa IOFLAG_READ, IOFLAG_WRITE, IOFLAG_APPEND, IOFLAG_SKIP_BOM.
+ * @sa IOFLAG_READ, IOFLAG_WRITE, IOFLAG_APPEND.
  *
  * @return A handle to the file on success and 0 on failure.
  *
@@ -1118,6 +1117,19 @@ std::string windows_format_system_message(unsigned long error);
 
 #endif
 
+void str_utf8_reverse(char* string);
+
+/**
+ * @defgroup Strings
+ *
+ * String related functions
+ */
+
+ /*
+  * String replace to lower case A-Z
+  */
+const char* str_lower(char* string);
+
 /**
  * @defgroup Strings
  *
@@ -1196,7 +1208,7 @@ void str_append_num(char* dst, const char* src, int dst_size, int num);
 /*
  * String replace
  */
-void str_replace(char* str, const char* from, const char* to);
+int str_replace(char* str, const char* from, const char* to);
 
 /**
  * Truncates a utf8 encoded string to a given length.
@@ -1770,7 +1782,9 @@ void str_timestamp_ex(time_t time, char *buffer, int buffer_size, const char *fo
 
 #define FORMAT_TIME "%H:%M:%S"
 #define FORMAT_SPACE "%Y-%m-%d %H:%M:%S"
+#define FORMAT_WITHOUT_SEC_SPACE "%Y-%m-%d %H:%M"
 #define FORMAT_NOSPACE "%Y-%m-%d_%H-%M-%S"
+#define FORMAT_WITHOUT_SEC_NOSPACE "%Y-%m-%d_%H:%M"
 
 enum
 {
@@ -2471,11 +2485,6 @@ size_t str_utf8_offset_bytes_to_chars(const char *str, size_t byte_offset);
 size_t str_utf8_offset_chars_to_bytes(const char *str, size_t char_offset);
 
 /*
-	Function: Pfffff
-*/
-void str_translation_utf8_to_cp(char* str);
-
-/*
 	Function: str_next_token
 		Writes the next token after str into buf, returns the rest of the string.
 
@@ -2602,9 +2611,9 @@ int kill_process(PROCESS process);
 
 /**
  * Checks if a process is alive.
- * 
+ *
  * @param process Handle/PID of the process.
- * 
+ *
  * @return bool Returns true if the process is currently running, false if the process is not running (dead).
  */
 bool is_process_alive(PROCESS process);

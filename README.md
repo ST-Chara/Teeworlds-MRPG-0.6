@@ -4,7 +4,8 @@ MRPG server transfer version from 0.7 to 0.6 (ddnet) with ex protocol and featur
 Wiki about maintaining mod: https://github.com/kurosio/Teeworlds-MRPG-0.6/wiki
 
 `readme will be changed over time`
- 
+
+# Not frozen but extremely rare development due to a lot of things to do besides MRPG
 
 A retro multiplayer shooter
 --------------------------- 

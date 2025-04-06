@@ -11,9 +11,7 @@
 
 #include <engine/server/server.h>
 #include <engine/server/server_logger.h>
-
 #include <engine/shared/assertion_logger.h>
-#include <engine/shared/config.h>
 
 #include "multi_worlds.h"
 
@@ -25,6 +23,8 @@
 #endif
 
 #include <csignal>
+
+#include "game/server/core/rcon_processor.h"
 
 volatile sig_atomic_t InterruptSignaled = 0;
 
@@ -95,6 +95,7 @@ int main(int argc, const char** argv)
 	init_exception_handler();
 #endif
 
+	CConectionPool::Initilize();
 	CServer* pServer = CreateServer();
 	pServer->SetLoggers(pFutureFileLogger, std::move(pStdoutLogger));
 
@@ -125,7 +126,6 @@ int main(int argc, const char** argv)
 		RegisterFail = RegisterFail || !pKernel->RegisterInterface(pConsole);
 		RegisterFail = RegisterFail || !pKernel->RegisterInterface(pStorage);
 		RegisterFail = RegisterFail || !pKernel->RegisterInterface(pConfigManager);
-		RegisterFail = RegisterFail || !pServer->MultiWorlds()->LoadWorlds(pKernel, pStorage, pConsole);
 
 		if(RegisterFail)
 		{
@@ -134,19 +134,27 @@ int main(int argc, const char** argv)
 		}
 	}
 
-	pServer->m_pLocalization = new CLocalization(pStorage);
-	if(!pServer->m_pLocalization->Init())
-	{
-		dbg_msg("localization", "could not initialize localization");
-		return -1;
-	}
 	pEngine->Init();
 	pConfigManager->Init();
 	pConsole->Init();
 
 	// register all console commands
 	pServer->RegisterCommands();
-	pConsole->ExecuteFile(AUTOEXEC_FILE);
+	RconProcessor::Init(pConsole, pServer); // crucial to call before config execution
+
+	if (!pConsole->ExecuteFile(AUTOEXEC_SERVER_FILE, -1, true)) {
+		pConsole->ExecuteFile(AUTOEXEC_FILE, -1, true);
+	}
+
+	if(!pServer->MultiWorlds()->LoadFromDB(pKernel))
+	{
+		dbg_msg("server", "failed to load worlds");
+		return -1;
+	}
+
+	// Initialize console commands in sub parts
+	for(int i = 0; i < pServer->MultiWorlds()->GetSizeInitilized(); i++)
+		pServer->MultiWorlds()->GetWorld(i)->GameServer()->OnConsoleInit();
 
 	// parse the command line arguments
 	if(argc > 1)
@@ -173,14 +181,13 @@ int main(int argc, const char** argv)
 
 	// run the server
 	dbg_msg("server", "starting...");
-	int Ret = pServer->Run();
+	int Ret = pServer->Run(pServerLogger.get());
 
-	pServerLogger->OnServerDeletion();
 	// free
-	delete pServer->m_pLocalization;
+	pServerLogger->OnServerDeletion();
 	delete pKernel;
 
 	secure_random_uninit();
-
+	CConectionPool::Free();
 	return Ret;
 }

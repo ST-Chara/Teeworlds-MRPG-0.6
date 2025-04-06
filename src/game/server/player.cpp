@@ -3,53 +3,49 @@
 #include "player.h"
 
 #include "gamecontext.h"
-#include "engine/shared/config.h"
 #include "worldmodes/dungeon.h"
 
-#include "mmocore/Components/Accounts/AccountManager.h"
-#include "mmocore/Components/Accounts/AccountMinerManager.h"
-#include "mmocore/Components/Bots/BotManager.h"
-#include "mmocore/Components/Dungeons/DungeonData.h"
-#include "mmocore/Components/Eidolons/EidolonInfoData.h"
-#include "mmocore/Components/Guilds/GuildManager.h"
-#include "mmocore/Components/Houses/HouseData.h"
-#include "mmocore/Components/Quests/QuestManager.h"
+#include "core/components/accounts/account_manager.h"
+#include "core/components/achievements/achievement_manager.h"
+#include "core/components/Bots/BotManager.h"
+#include "core/components/dungeons/dungeon_data.h"
+#include "core/components/Eidolons/EidolonInfoData.h"
+#include "core/components/guilds/guild_manager.h"
+#include "core/components/quests/quest_manager.h"
 
-#include "mmocore/Components/Inventory/ItemData.h"
-#include "mmocore/Components/Skills/SkillData.h"
-#include "mmocore/Components/Groups/GroupData.h"
+#include "core/components/Inventory/ItemData.h"
+#include "core/components/skills/skill_data.h"
+#include "core/components/groups/group_data.h"
+#include "core/components/worlds/world_data.h"
 
-MACRO_ALLOC_POOL_ID_IMPL(CPlayer, MAX_CLIENTS* ENGINE_MAX_WORLDS + MAX_CLIENTS)
+#include "core/tools/vote_optional.h"
+#include "core/scenarios/scenario_universal.h"
+
+MACRO_ALLOC_POOL_ID_IMPL(CPlayer, MAX_CLIENTS * ENGINE_MAX_WORLDS + MAX_CLIENTS)
 
 IServer* CPlayer::Server() const { return m_pGS->Server(); };
 
 CPlayer::CPlayer(CGS* pGS, int ClientID) : m_pGS(pGS), m_ClientID(ClientID)
 {
-	for(short& SortTab : m_aSortTabs)
-		SortTab = -1;
-
-	m_EidolonCID = -1;
-	m_Spawned = true;
-	m_SnapHealthTick = 0;
 	m_aPlayerTick[Die] = Server()->Tick();
 	m_aPlayerTick[Respawn] = Server()->Tick() + Server()->TickSpeed();
+	m_SnapHealthNicknameTick = 0;
+
+	m_WantSpawn = true;
 	m_PrevTuningParams = *pGS->Tuning();
 	m_NextTuningParams = m_PrevTuningParams;
-	m_Cooldown.Initilize(ClientID);
+	m_Scenarios.Init(ClientID);
+	m_Cooldown.Init(ClientID);
+	m_VotesData.Init(m_pGS, this);
+	m_Dialog.Init(this);
 
 	// constructor only for players
 	if(m_ClientID < MAX_PLAYERS)
 	{
-		m_TutorialStep = 1;
-		m_LastVoteMenu = NOPE;
-		m_CurrentVoteMenu = MENU_MAIN;
-		m_ZoneInvertMenu = false;
-		m_MoodState = Mood::NORMAL;
-		Acc().m_Team = GetStartTeam();
+		m_MoodState = Mood::Normal;
 		GS()->SendTuningParams(ClientID);
 
 		m_Afk = false;
-		delete m_pLastInput;
 		m_pLastInput = new CNetObj_PlayerInput({ 0 });
 		m_LastInputInit = false;
 		m_LastPlaytime = 0;
@@ -58,58 +54,115 @@ CPlayer::CPlayer(CGS* pGS, int ClientID) : m_pGS(pGS), m_ClientID(ClientID)
 
 CPlayer::~CPlayer()
 {
-	m_aHiddenMenu.clear();
+	// free data
+	if(m_pCharacter)
+	{
+		delete m_pCharacter;
+		m_pCharacter = nullptr;
+	}
 	delete m_pLastInput;
-	delete m_pCharacter;
-	m_pCharacter = nullptr;
 }
 
-/* #########################################################################
-	FUNCTIONS PLAYER ENGINE
-######################################################################### */
+void CPlayer::GetFormatedName(char* aBuffer, int BufferSize)
+{
+	const auto isChatting = m_PlayerFlags & PLAYERFLAG_CHATTING;
+	const auto isAuthed = IsAuthed();
+	const auto currentTick = Server()->Tick();
+	const auto tickSpeed = Server()->TickSpeed();
+
+	// Player is not chatting and health nickname tick is valid
+	if(!isChatting && currentTick < m_SnapHealthNicknameTick)
+	{
+		char aHealthProgressBuf[6];
+		char aNicknameBuf[MAX_NAME_LENGTH];
+		const int PercentHP = round_to_int(translate_to_percent(GetMaxHealth(), GetHealth()));
+
+		str_format(aHealthProgressBuf, sizeof(aHealthProgressBuf), ":%d%%", clamp(PercentHP, 1, 100));
+		str_utf8_truncate(aNicknameBuf, sizeof(aNicknameBuf), Server()->ClientName(m_ClientID), MAX_NAME_LENGTH - 1 - str_length(aHealthProgressBuf));
+		str_format(aBuffer, BufferSize, "%s%s", aNicknameBuf, aHealthProgressBuf);
+		return;
+	}
+
+	// Update nickname leveling tick if player is authenticated and the tick is a multiple of 10 seconds
+	if(isAuthed && currentTick % (tickSpeed * 10) == 0)
+	{
+		m_aPlayerTick[RefreshNickLeveling] = currentTick + tickSpeed;
+	}
+
+	// Player is authenticated, nickname leveling tick is valid, and not chatting
+	if(isAuthed && m_aPlayerTick[RefreshNickLeveling] > currentTick && !isChatting)
+	{
+		str_format(aBuffer, BufferSize, "Lv%d %.4s...", Account()->GetLevel(), Server()->ClientName(m_ClientID));
+	}
+	else
+	{
+		str_copy(aBuffer, Server()->ClientName(m_ClientID), BufferSize);
+	}
+}
+
 void CPlayer::Tick()
 {
 	if(!IsAuthed())
 		return;
 
-	IServer::CClientInfo Info;
-	if(Server()->GetClientInfo(m_ClientID, &Info))
+	// do latency stuff
 	{
-		m_Latency.m_AccumMax = maximum(m_Latency.m_AccumMax, Info.m_Latency);
-		m_Latency.m_AccumMin = minimum(m_Latency.m_AccumMin, Info.m_Latency);
-		Server()->SetClientScore(m_ClientID, Acc().m_Level);
-	}
+		int Latency = Server()->GetClientLatency(m_ClientID);
+		if(Latency > 0)
+		{
+			m_Latency.m_Accum += Latency;
+			m_Latency.m_AccumMax = maximum(m_Latency.m_AccumMax, Latency);
+			m_Latency.m_AccumMin = minimum(m_Latency.m_AccumMin, Latency);
+		}
+		// each second
+		if(Server()->Tick() % Server()->TickSpeed() == 0)
+		{
+			m_Latency.m_Avg = m_Latency.m_Accum / Server()->TickSpeed();
+			m_Latency.m_Max = m_Latency.m_AccumMax;
+			m_Latency.m_Min = m_Latency.m_AccumMin;
+			m_Latency.m_Accum = 0;
+			m_Latency.m_AccumMin = 1000;
+			m_Latency.m_AccumMax = 0;
+		}
 
-	if(Server()->Tick() % Server()->TickSpeed() == 0)
-	{
-		m_Latency.m_Max = m_Latency.m_AccumMax;
-		m_Latency.m_Min = m_Latency.m_AccumMin;
-		m_Latency.m_AccumMin = 1000;
-		m_Latency.m_AccumMax = 0;
+		Server()->SetClientScore(m_ClientID, Account()->GetLevel());
 	}
 
 	if(m_pCharacter)
 	{
 		if(m_pCharacter->IsAlive())
+		{
 			m_ViewPos = m_pCharacter->GetPos();
+		}
 		else
 		{
 			delete m_pCharacter;
 			m_pCharacter = nullptr;
 		}
 	}
-	else if(m_Spawned && m_aPlayerTick[Respawn] + Server()->TickSpeed() * 3 <= Server()->Tick())
+	else if(m_WantSpawn && m_aPlayerTick[Respawn] + Server()->TickSpeed() * 3 <= Server()->Tick())
 	{
 		TryRespawn();
 	}
 
-	// update dialog
-	m_Dialog.TickUpdate();
-	m_Cooldown.Handler();
+	// update events
+	m_FixedView.Tick(m_ViewPos);
+	m_Scenarios.Tick();
+	m_Cooldown.Tick();
+	if(m_pMotdMenu)
+	{
+		m_pMotdMenu->Tick();
+	}
+	else
+	{
+		m_Dialog.Tick();
+	}
 
-	// post updated votes if player open menu
-	if(m_PlayerFlags & PLAYERFLAG_IN_MENU && IsActivePostVoteList())
-		PostVoteList();
+	if(Account()->IsCrimeDecreaseTime())
+		Account()->DecreaseCrime(10);
+
+	if(m_PlayerFlags & PLAYERFLAG_IN_MENU)
+		m_VotesData.ApplyVoteUpdaterData();
 }
 
 void CPlayer::PostTick()
@@ -121,152 +174,96 @@ void CPlayer::PostTick()
 		if(Server()->ClientIngame(m_ClientID))
 			GetTempData().m_TempPing = m_Latency.m_Min;
 
-		// Execute the effects tick function
-		HandleEffects();
-
-		// Handle tuning parameters
+		// handlers
 		HandleTuningParams();
+		CVoteOptional::HandleVoteOptionals(m_ClientID);
+		Account()->GetBonusManager().PostTick();
+		Account()->GetPrisonManager().PostTick();
+		m_Effects.PostTick();
+		m_Scenarios.PostTick();
 	}
 
-	// Handle scoreboard colors
+	// handlers
 	HandleScoreboardColors();
+}
 
-	// Call the function HandleVoteOptionals() to handle any optional vote features.
-	HandleVoteOptionals();
+void CPlayer::PrepareRespawnTick()
+{
+	m_aPlayerTick[Respawn] = Server()->Tick() + Server()->TickSpeed() / 2;
+	m_WantSpawn = true;
 }
 
 CPlayerBot* CPlayer::GetEidolon() const
 {
-	if(m_EidolonCID < MAX_PLAYERS || m_EidolonCID >= MAX_CLIENTS)
+	if(!m_EidolonCID)
 		return nullptr;
-	return dynamic_cast<CPlayerBot*>(GS()->m_apPlayers[m_EidolonCID]);
+
+	return dynamic_cast<CPlayerBot*>(GS()->GetPlayer(m_EidolonCID.value()));
 }
 
 void CPlayer::TryCreateEidolon()
 {
-	if(IsBot() || !IsAuthed() || !GetCharacter())
+	if(IsBot() || !IsAuthed() || !GetCharacter() || m_EidolonCID.has_value())
 		return;
 
-	int EidolonItemID = GetEquippedItemID(EQUIP_EIDOLON);
-	if(CEidolonInfoData* pEidolonData = GS()->GetEidolonByItemID(EidolonItemID))
+	// check valid equppied item id
+	const auto eidolonItemID = GetEquippedItemID(ItemType::EquipEidolon);
+	if(!eidolonItemID.has_value())
+		return;
+
+	// try to create eidolon
+	if(const auto* pEidolonData = GS()->GetEidolonByItemID(eidolonItemID.value()))
 	{
-		if(const int EidolonCID = GS()->CreateBot(TYPE_BOT_EIDOLON, pEidolonData->GetDataBotID(), m_ClientID); EidolonCID != -1)
+		if(int eidolonCID = GS()->CreateBot(TYPE_BOT_EIDOLON, pEidolonData->GetDataBotID(), m_ClientID); eidolonCID != -1)
 		{
-			dynamic_cast<CPlayerBot*>(GS()->m_apPlayers[EidolonCID])->m_EidolonItemID = EidolonItemID;
-			m_EidolonCID = EidolonCID;
+			if(auto* pEidolonPlayer = dynamic_cast<CPlayerBot*>(GS()->GetPlayer(eidolonCID)))
+			{
+				pEidolonPlayer->m_EidolonItemID = eidolonItemID.value();
+				m_EidolonCID = eidolonCID;
+			}
 		}
 	}
 }
 
 void CPlayer::TryRemoveEidolon()
 {
-	if(IsBot())
-		return;
-
-	if(m_EidolonCID >= MAX_PLAYERS && m_EidolonCID < MAX_CLIENTS && GS()->m_apPlayers[m_EidolonCID])
+	// try to remove eidolon
+	if(m_EidolonCID)
 	{
-		if(GS()->m_apPlayers[m_EidolonCID]->GetCharacter())
-			GS()->m_apPlayers[m_EidolonCID]->KillCharacter(WEAPON_WORLD);
-
-		delete GS()->m_apPlayers[m_EidolonCID];
-		GS()->m_apPlayers[m_EidolonCID] = nullptr;
-	}
-
-	m_EidolonCID = -1;
-}
-
-
-void CPlayer::HandleEffects()
-{
-	if(Server()->Tick() % Server()->TickSpeed() != 0 || CGS::ms_aEffects[m_ClientID].empty())
-		return;
-
-	for(auto pEffect = CGS::ms_aEffects[m_ClientID].begin(); pEffect != CGS::ms_aEffects[m_ClientID].end();)
-	{
-		pEffect->second--;
-		if(pEffect->second <= 0)
-		{
-			GS()->Chat(m_ClientID, "You lost the {STR} effect.", pEffect->first.c_str());
-			pEffect = CGS::ms_aEffects[m_ClientID].erase(pEffect);
-			continue;
-		}
-
-		++pEffect;
+		GS()->DestroyPlayer(m_EidolonCID.value());
+		m_EidolonCID.reset();
 	}
 }
 
 void CPlayer::HandleScoreboardColors()
 {
-	if(m_TickActivedGroupColors > Server()->Tick())
+	if(m_TickActivatedGroupColour > Server()->Tick())
 		return;
 
-	// If the player's flags include the PLAYERFLAG_SCOREBOARD flag
-	if(m_PlayerFlags & PLAYERFLAG_SCOREBOARD)
+	bool ScoreboardActive = m_PlayerFlags & PLAYERFLAG_SCOREBOARD;
+	if(ScoreboardActive != m_ActivatedGroupColour)
 	{
-		// If the active group colors have not been set yet
-		if(!m_ActivedGroupColors)
+		CMsgPacker Msg(NETMSGTYPE_SV_TEAMSSTATE);
+		CMsgPacker MsgLegacy(NETMSGTYPE_SV_TEAMSSTATELEGACY);
+
+		for(int i = 0; i < VANILLA_MAX_CLIENTS; ++i)
 		{
-			// Create two message packers: Msg and MsgLegacy
-			CMsgPacker Msg(NETMSGTYPE_SV_TEAMSSTATE);
-			CMsgPacker MsgLegacy(NETMSGTYPE_SV_TEAMSSTATELEGACY);
-			for(int i = 0; i < MAX_PLAYERS; i++)
-			{
-				CPlayer* pPlayer = GS()->GetPlayer(i, true);
+			CPlayer* pPlayer = GS()->GetPlayer(i, true);
+			int TeamColor = (ScoreboardActive && pPlayer && pPlayer->Account()->GetGroup()) ?
+				pPlayer->Account()->GetGroup()->GetTeamColor() : 0;
 
-				// Add the team color of the group to both message packers
-				if(pPlayer && pPlayer->Acc().GetGroup())
-				{
-					Msg.AddInt(pPlayer->Acc().GetGroup()->GetTeamColor());
-					MsgLegacy.AddInt(pPlayer->Acc().GetGroup()->GetTeamColor());
-					continue;
-				}
-
-				Msg.AddInt(-1);
-				MsgLegacy.AddInt(-1);
-			}
-			Server()->SendMsg(&Msg, MSGFLAG_VITAL, m_ClientID);
-
-			// Get the client version of the player the client version is between VERSION_DDRACE and VERSION_DDNET_MSG_LEGACY
-			int ClientVersion = Server()->GetClientVersion(m_ClientID);
-			if(VERSION_DDRACE < ClientVersion && ClientVersion < VERSION_DDNET_MSG_LEGACY)
-				Server()->SendMsg(&MsgLegacy, MSGFLAG_VITAL, m_ClientID);
-
-			// Set the active group colors to true
-			m_ActivedGroupColors = true;
-			m_TickActivedGroupColors = Server()->Tick() + (Server()->TickSpeed() / 4);
+			Msg.AddInt(TeamColor);
+			MsgLegacy.AddInt(TeamColor);
 		}
-	}
-	// If the player flags do not have the PLAYERFLAG_SCOREBOARD flag
-	else if(m_PlayerFlags ^ PLAYERFLAG_SCOREBOARD)
-	{
-		// If group colors are active
-		if(m_ActivedGroupColors)
-		{
-			// Create two message packers: Msg and MsgLegacy
-			CMsgPacker Msg(NETMSGTYPE_SV_TEAMSSTATE);
-			CMsgPacker MsgLegacy(NETMSGTYPE_SV_TEAMSSTATELEGACY);
-			for(int i = 0; i < MAX_PLAYERS; i++)
-			{
-				// Get the player data
-				CPlayer* pPlayer = GS()->GetPlayer(i, true);
-				if(!pPlayer)
-					continue;
 
-				// Add the team color of the group to both message packers
-				Msg.AddInt(0);
-				MsgLegacy.AddInt(0);
-			}
-			Server()->SendMsg(&Msg, MSGFLAG_VITAL, m_ClientID);
+		Server()->SendMsg(&Msg, MSGFLAG_VITAL, m_ClientID);
 
-			// Get the client version of the player client version is between VERSION_DDRACE and VERSION_DDNET_MSG_LEGACY
-			int ClientVersion = Server()->GetClientVersion(m_ClientID);
-			if(VERSION_DDRACE < ClientVersion && ClientVersion < VERSION_DDNET_MSG_LEGACY)
-				Server()->SendMsg(&MsgLegacy, MSGFLAG_VITAL, m_ClientID);
+		int ClientVersion = Server()->GetClientVersion(m_ClientID);
+		if(VERSION_DDRACE < ClientVersion && ClientVersion < VERSION_DDNET_MSG_LEGACY)
+			Server()->SendMsg(&MsgLegacy, MSGFLAG_VITAL, m_ClientID);
 
-			// Set the active group colors to false
-			m_ActivedGroupColors = false;
-			m_TickActivedGroupColors = Server()->Tick() + (Server()->TickSpeed() / 4);
-		}
+		m_ActivatedGroupColour = ScoreboardActive;
+		m_TickActivatedGroupColour = Server()->Tick() + (Server()->TickSpeed() / 4);
 	}
 }
 
@@ -289,197 +286,141 @@ void CPlayer::HandleTuningParams()
 
 void CPlayer::Snap(int SnappingClient)
 {
-	CNetObj_ClientInfo* pClientInfo = static_cast<CNetObj_ClientInfo*>(Server()->SnapNewItem(NETOBJTYPE_CLIENTINFO, m_ClientID, sizeof(CNetObj_ClientInfo)));
-	if(!pClientInfo)
-		return;
-
-	// Check if the player is not currently chatting and the server tick is less than the snapshot health tick
-	if(!(m_PlayerFlags & PLAYERFLAG_CHATTING) && Server()->Tick() < m_SnapHealthTick)
+	// client info
+	if(auto* pClientInfo = Server()->SnapNewItem<CNetObj_ClientInfo>(m_ClientID))
 	{
-		const int PercentHP = translate_to_percent(GetStartHealth(), GetHealth());
-		char aHealthProgressBuf[6];
-		char aNicknameBuf[MAX_NAME_LENGTH];
-		char aEndNicknameBuf[MAX_NAME_LENGTH];
-
-		// Format the health progress string with the calculated percentage
-		str_format(aHealthProgressBuf, sizeof(aHealthProgressBuf), ":%d%%", clamp(PercentHP, 1, 100));
-
-		// Truncate the player's nickname to fit the available space, leaving room for the health progress string
-		str_utf8_truncate(aNicknameBuf, sizeof(aNicknameBuf), Server()->ClientName(m_ClientID), (int)((MAX_NAME_LENGTH - 1) - str_length(aHealthProgressBuf)));
-
-		// Concatenate the truncated nickname and the health progress string
-		str_format(aEndNicknameBuf, sizeof(aEndNicknameBuf), "%s%s", aNicknameBuf, aHealthProgressBuf);
-
-		// Convert the final nickname to integer values and store them in the client info structure
-		StrToInts(&pClientInfo->m_Name0, 4, aEndNicknameBuf);
-	}
-	else
-	{
-		// Check if the player is authenticated and if the tick is a multiple of 10 seconds
-		if(IsAuthed() && Server()->Tick() % (Server()->TickSpeed() * 10) == 0)
+		// prepare clan string
+		if(m_aPlayerTick[RefreshClanTitle] < Server()->Tick())
 		{
-			// Set the refresh tick for nickname leveling to be 1 second in the future
-			m_aPlayerTick[RefreshNickLeveling] = Server()->Tick() + Server()->TickSpeed();
+			const auto clanStringSize = str_utf8_fix_truncation(m_aRotateClanBuffer);
+			std::rotate(m_aRotateClanBuffer, m_aRotateClanBuffer + str_utf8_forward(m_aRotateClanBuffer, 0), m_aRotateClanBuffer + clanStringSize);
+			m_aPlayerTick[RefreshClanTitle] = Server()->Tick() + (m_aRotateClanBuffer[0] == '|' ? Server()->TickSpeed() : Server()->TickSpeed() / 8);
+
+			if(m_aInitialClanBuffer[0] == '\0' || str_comp_nocase(m_aRotateClanBuffer, m_aInitialClanBuffer) == 0)
+			{
+				RefreshClanTagString();
+			}
 		}
 
-		// Check if the player is authenticated and if the refresh tick for nickname leveling is in the future
-		if(IsAuthed() && m_aPlayerTick[RefreshNickLeveling] > Server()->Tick())
-		{
-			// Create a buffer for the new nickname with the format "Level - X", where X is the player's level
-			char aBufNicknameLeveling[MAX_NAME_LENGTH];
-			str_format(aBufNicknameLeveling, sizeof(aBufNicknameLeveling), "Level - %d", Acc().m_Level);
-
-			// Convert the new nickname to integer values and update the client info's m_Name0 field
-			StrToInts(&pClientInfo->m_Name0, 4, aBufNicknameLeveling);
-		}
-		else
-		{
-			// Convert the default nickname to integer values and update the client info's m_Name0 field
-			StrToInts(&pClientInfo->m_Name0, 4, Server()->ClientName(m_ClientID));
-		}
+		char aNameBuf[MAX_NAME_LENGTH];
+		GetFormatedName(aNameBuf, sizeof(aNameBuf));
+		StrToInts(&pClientInfo->m_Name0, 4, aNameBuf);
+		StrToInts(&pClientInfo->m_Clan0, 3, m_aRotateClanBuffer);
+		pClientInfo->m_Country = Server()->ClientCountry(m_ClientID);
+		StrToInts(&pClientInfo->m_Skin0, 6, Account()->GetTeeInfo().m_aSkinName);
+		pClientInfo->m_UseCustomColor = Account()->GetTeeInfo().m_UseCustomColor;
+		pClientInfo->m_ColorBody = Account()->GetTeeInfo().m_ColorBody;
+		pClientInfo->m_ColorFeet = Account()->GetTeeInfo().m_ColorFeet;
 	}
 
-	// Check if it's time to refresh the clan title
-	if(m_aPlayerTick[RefreshClanTitle] < Server()->Tick())
+	// player info
+	if(auto* pPlayerInfo = Server()->SnapNewItem<CNetObj_PlayerInfo>(m_ClientID))
 	{
-		// Rotate the clan string by the length of the first character
-		int clanStringSize = str_utf8_fix_truncation(m_aClanString);
-		std::rotate(std::begin(m_aClanString), std::begin(m_aClanString) + str_utf8_forward(m_aClanString, 0), std::end(m_aClanString));
+		const bool localClient = m_ClientID == SnappingClient;
+		const bool isViewLocked = m_FixedView.GetCurrentView().has_value();
 
-		// Set the next tick for refreshing the clan title
-		m_aPlayerTick[RefreshClanTitle] = Server()->Tick() + (((m_aClanString[0] == '|') || (clanStringSize - 1 < 10)) ? Server()->TickSpeed() : (Server()->TickSpeed() / 8));
+		pPlayerInfo->m_Local = localClient;
+		pPlayerInfo->m_ClientId = m_ClientID;
+		pPlayerInfo->m_Team = GetTeam();
+		pPlayerInfo->m_Latency = (SnappingClient == -1 ? m_Latency.m_Min : GetTempData().m_TempPing);
+		pPlayerInfo->m_Score = Account()->GetLevel();
 
-		// If the clan string size is less than 10
-		if(clanStringSize < 10)
+		// ddnet player
+		if(auto* pDDNetPlayer = Server()->SnapNewItem<CNetObj_DDNetPlayer>(m_ClientID))
 		{
-			// Set the next tick for refreshing the clan title to current tick + 1 second
-			m_aPlayerTick[RefreshClanTitle] = Server()->Tick() + Server()->TickSpeed();
-
-			// Refresh the clan string
-			RefreshClanString();
+			pDDNetPlayer->m_AuthLevel = Server()->GetAuthedState(m_ClientID);
+			pDDNetPlayer->m_Flags = isViewLocked ? EXPLAYERFLAG_SPEC : 0;
 		}
-	}
 
-	StrToInts(&pClientInfo->m_Clan0, 3, m_aClanString);
-	pClientInfo->m_Country = Server()->ClientCountry(m_ClientID);
-	StrToInts(&pClientInfo->m_Skin0, 6, GetTeeInfo().m_aSkinName);
-	pClientInfo->m_UseCustomColor = GetTeeInfo().m_UseCustomColor;
-	pClientInfo->m_ColorBody = GetTeeInfo().m_ColorBody;
-	pClientInfo->m_ColorFeet = GetTeeInfo().m_ColorFeet;
+		// spectator info
+		if(localClient && (GetTeam() == TEAM_SPECTATORS || isViewLocked))
+		{
+			if(auto* pSpectatorInfo = Server()->SnapNewItem<CNetObj_SpectatorInfo>(m_ClientID))
+			{
+				pSpectatorInfo->m_X = m_ViewPos.x;
+				pSpectatorInfo->m_Y = m_ViewPos.y;
+				pSpectatorInfo->m_SpectatorId = (isViewLocked ? m_ClientID : -1);
+				m_FixedView.Reset();
+			}
 
-	CNetObj_PlayerInfo* pPlayerInfo = static_cast<CNetObj_PlayerInfo*>(Server()->SnapNewItem(NETOBJTYPE_PLAYERINFO, m_ClientID, sizeof(CNetObj_PlayerInfo)));
-	if(!pPlayerInfo)
-		return;
-
-	const bool localClient = m_ClientID == SnappingClient;
-	pPlayerInfo->m_Local = localClient;
-	pPlayerInfo->m_ClientID = m_ClientID;
-	pPlayerInfo->m_Team = GetTeam();
-	pPlayerInfo->m_Latency = (SnappingClient == -1 ? m_Latency.m_Min : GetTempData().m_TempPing);
-	pPlayerInfo->m_Score = Acc().m_Level;
-
-	if(m_ClientID == SnappingClient && (GetTeam() == TEAM_SPECTATORS))
-	{
-		CNetObj_SpectatorInfo* pSpectatorInfo = static_cast<CNetObj_SpectatorInfo*>(Server()->SnapNewItem(NETOBJTYPE_SPECTATORINFO, m_ClientID, sizeof(CNetObj_SpectatorInfo)));
-		if(!pSpectatorInfo)
-			return;
-
-		pSpectatorInfo->m_SpectatorID = -1;
-		pSpectatorInfo->m_X = m_ViewPos.x;
-		pSpectatorInfo->m_Y = m_ViewPos.y;
+			if(auto* pDDNetSpectatorInfo = Server()->SnapNewItem<CNetObj_DDNetSpectatorInfo>(m_ClientID))
+			{
+				pDDNetSpectatorInfo->m_HasCameraInfo = 0;
+				pDDNetSpectatorInfo->m_Zoom = 1000;
+				pDDNetSpectatorInfo->m_Deadzone = 800;
+				pDDNetSpectatorInfo->m_FollowFactor = 0;
+			}
+		}
 	}
 }
 
 void CPlayer::FakeSnap()
 {
-	int FakeID = VANILLA_MAX_CLIENTS - 1;
-	CNetObj_ClientInfo* pClientInfo = static_cast<CNetObj_ClientInfo*>(Server()->SnapNewItem(NETOBJTYPE_CLIENTINFO, FakeID, sizeof(CNetObj_ClientInfo)));
-	if(!pClientInfo)
-		return;
+	constexpr int FakeID = VANILLA_MAX_CLIENTS - 1;
 
-	StrToInts(&pClientInfo->m_Name0, 4, " ");
-	StrToInts(&pClientInfo->m_Clan0, 3, "");
-	StrToInts(&pClientInfo->m_Skin0, 6, "default");
+	// client info
+	if(auto* pClientInfo = Server()->SnapNewItem<CNetObj_ClientInfo>(FakeID))
+	{
+		StrToInts(&pClientInfo->m_Name0, 4, " ");
+		StrToInts(&pClientInfo->m_Clan0, 3, "");
+		StrToInts(&pClientInfo->m_Skin0, 6, "default");
+	}
 
-	CNetObj_PlayerInfo* pPlayerInfo = static_cast<CNetObj_PlayerInfo*>(Server()->SnapNewItem(NETOBJTYPE_PLAYERINFO, FakeID, sizeof(CNetObj_PlayerInfo)));
-	if(!pPlayerInfo)
-		return;
+	// player info
+	if(auto* pPlayerInfo = Server()->SnapNewItem<CNetObj_PlayerInfo>(FakeID))
+	{
+		pPlayerInfo->m_Latency = m_Latency.m_Min;
+		pPlayerInfo->m_Local = 1;
+		pPlayerInfo->m_ClientId = FakeID;
+		pPlayerInfo->m_Score = -9999;
+		pPlayerInfo->m_Team = TEAM_SPECTATORS;
+	}
 
-	pPlayerInfo->m_Latency = m_Latency.m_Min;
-	pPlayerInfo->m_Local = 1;
-	pPlayerInfo->m_ClientID = FakeID;
-	pPlayerInfo->m_Score = -9999;
-	pPlayerInfo->m_Team = TEAM_SPECTATORS;
-
-	CNetObj_SpectatorInfo* pSpectatorInfo = static_cast<CNetObj_SpectatorInfo*>(Server()->SnapNewItem(NETOBJTYPE_SPECTATORINFO, FakeID, sizeof(CNetObj_SpectatorInfo)));
-	if(!pSpectatorInfo)
-		return;
-
-	pSpectatorInfo->m_SpectatorID = -1;
-	pSpectatorInfo->m_X = m_ViewPos.x;
-	pSpectatorInfo->m_Y = m_ViewPos.y;
+	// spectator info
+	if(auto* pSpectatorInfo = Server()->SnapNewItem<CNetObj_SpectatorInfo>(FakeID))
+	{
+		pSpectatorInfo->m_SpectatorId = -1;
+		pSpectatorInfo->m_X = m_ViewPos.x;
+		pSpectatorInfo->m_Y = m_ViewPos.y;
+	}
 }
 
-void CPlayer::RefreshClanString()
+void CPlayer::RefreshClanTagString()
 {
+	// is not authed send only clan
 	if(!IsAuthed())
 	{
-		str_copy(m_aClanString, Server()->ClientClan(m_ClientID), sizeof(m_aClanString));
+		str_copy(m_aRotateClanBuffer, Server()->ClientClan(m_ClientID), sizeof(m_aRotateClanBuffer));
 		return;
 	}
 
-	dynamic_string Buffer {};
+	// top rank position
+	auto* pAccount = Account();
+	auto RatingRank = Server()->GetAccountRank(pAccount->GetID());
+	auto RatingPoints = pAccount->GetRatingSystem().GetRating();
+	auto RatingRankName = pAccount->GetRatingSystem().GetRankName();
+	std::string prepared = fmt_default(" | #{} {}({})", RatingRank, RatingRankName, RatingPoints);
 
 	// location
-	Buffer.append(Server()->GetWorldName(GetPlayerWorldID()));
+	prepared += fmt_default(" | {}", Server()->GetWorldName(GetCurrentWorldID()));
+
+	// title
+	if(const auto titleItemID = GetEquippedItemID(ItemType::EquipTitle); titleItemID.has_value())
+		prepared += fmt_default(" | {}", GetItem(titleItemID.value())->Info()->GetName());
 
 	// guild
-	if(Acc().IsGuild())
-	{
-		Buffer.append(" | ");
-		Buffer.append(GS()->Mmo()->Member()->GuildName(Acc().m_GuildID));
-		Buffer.append(" : ");
-		Buffer.append(GS()->Mmo()->Member()->GetGuildRank(Acc().m_GuildID, Acc().m_GuildRank));
-	}
+	if(const auto* pGuild = pAccount->GetGuild())
+		prepared += fmt_default(" | {} : {}", pGuild->GetName(), pAccount->GetGuildMember()->GetRank()->GetName());
 
 	// class
-	const int AttributesByType[3] = { GetTypeAttributesSize(AttributeType::Tank),
-										GetTypeAttributesSize(AttributeType::Healer), GetTypeAttributesSize(AttributeType::Dps) };
-
-	int MaxAttributesPower = 0;
-	AttributeType Class = AttributeType::Tank;
-	for(int i = 0; i < 3; i++)
-	{
-		if(AttributesByType[i] > MaxAttributesPower)
-		{
-			MaxAttributesPower = AttributesByType[i];
-			Class = static_cast<AttributeType>(i);
-		}
-	}
-
-	const char* pClassName;
-	switch(Class)
-	{
-		case AttributeType::Healer: pClassName = "_Healer_"; break;
-		case AttributeType::Dps: pClassName = "_DPS_"; break;
-		default: pClassName = "_Tank_"; break;
-	}
-
-	char aBufClass[64];
-	str_format(aBufClass, sizeof(aBufClass), "%-*s | %dp", 10 - str_length(pClassName), pClassName, MaxAttributesPower);
-	Buffer.append(" | ");
-	Buffer.append(aBufClass);
+	char classBuffer[64];
+	const char* professionName = GetProfessionName(Account()->GetActiveProfessionID());
+	str_format(classBuffer, sizeof(classBuffer), " %-*s ", 8 - str_length(professionName), professionName);
+	prepared += fmt_default(" | {}", classBuffer);
 
 	// end format
-	str_format(m_aClanString, sizeof(m_aClanString), "%s", Buffer.buffer());
-
-	Buffer.clear();
-}
-
-void CPlayer::PostVoteList()
-{
-	m_PostVotes();
-	m_PostVotes = nullptr;
+	str_format(m_aRotateClanBuffer, sizeof(m_aRotateClanBuffer), "%s", prepared.c_str());
+	str_format(m_aInitialClanBuffer, sizeof(m_aInitialClanBuffer), "%s", prepared.c_str());
 }
 
 CCharacter* CPlayer::GetCharacter() const
@@ -491,33 +432,53 @@ CCharacter* CPlayer::GetCharacter() const
 
 void CPlayer::TryRespawn()
 {
-	vec2 SpawnPos;
 	int SpawnType = SPAWN_HUMAN;
-	if(GetTempData().m_TempSafeSpawn)
-	{
-		const int SafezoneWorldID = GS()->GetRespawnWorld();
-		if(SafezoneWorldID >= 0 && !GS()->IsPlayerEqualWorld(m_ClientID, SafezoneWorldID))
-		{
-			ChangeWorld(SafezoneWorldID);
-			return;
-		}
+	std::optional<vec2> FinalSpawnPos = std::nullopt;
 
-		SpawnType = SPAWN_HUMAN_SAFE;
+	// spawn by prison
+	if(Account()->GetPrisonManager().IsInPrison())
+	{
+		SpawnType = SPAWN_HUMAN_PRISON;
 	}
 
-	if(GS()->m_pController->CanSpawn(SpawnType, &SpawnPos))
+	// spawn by kill
+	else if(GetTempData().m_LastKilledByWeapon != WEAPON_WORLD)
 	{
-		if(!GS()->IsDungeon() && length_squared(GetTempData().m_TempTeleportPos) >= 1.0f)
+		auto* pRespawnWorld = GS()->GetWorldData()->GetRespawnWorld();
+		if(pRespawnWorld && !GS()->IsPlayerInWorld(m_ClientID, pRespawnWorld->GetID()))
 		{
-			SpawnPos = GetTempData().m_TempTeleportPos;
-			GetTempData().m_TempTeleportPos = vec2(-1, -1);
+			ChangeWorld(pRespawnWorld->GetID());
+			return;
 		}
+	}
 
-		const int AllocMemoryCell = MAX_CLIENTS * GS()->GetWorldID() + m_ClientID;
+	// spawn by optional teleport
+	else if(!GS()->IsWorldType(WorldType::Dungeon))
+	{
+		auto optionalSpawnPos = GetTempData().GetSpawnPosition();
+		if(optionalSpawnPos.has_value() && !GS()->Collision()->CheckPoint(*optionalSpawnPos))
+			FinalSpawnPos = optionalSpawnPos;
+	}
+
+
+	// prepare spawn position
+	if(!FinalSpawnPos.has_value())
+	{
+		vec2 SpawnPos;
+		if(GS()->m_pController->CanSpawn(SpawnType, &SpawnPos))
+			FinalSpawnPos = SpawnPos;
+	}
+
+
+	// respawn character
+	if(FinalSpawnPos.has_value())
+	{
+		int AllocMemoryCell = MAX_CLIENTS * GS()->GetWorldID() + m_ClientID;
 		m_pCharacter = new(AllocMemoryCell) CCharacter(&GS()->m_World);
-		m_pCharacter->Spawn(this, SpawnPos);
-		GS()->CreatePlayerSpawn(SpawnPos);
-		m_Spawned = false;
+		m_pCharacter->Spawn(this, *FinalSpawnPos);
+		GS()->CreatePlayerSpawn(*FinalSpawnPos);
+		GetTempData().ClearSpawnPosition();
+		m_WantSpawn = false;
 	}
 }
 
@@ -538,18 +499,24 @@ void CPlayer::OnDisconnect()
 
 void CPlayer::OnDirectInput(CNetObj_PlayerInput* pNewInput)
 {
-	// update view pos
+	// Update view position for spectators
 	if(!m_pCharacter && GetTeam() == TEAM_SPECTATORS)
 		m_ViewPos = vec2(pNewInput->m_TargetX, pNewInput->m_TargetY);
 
-	// reset input with chating
+	// parse event keys
+	Server()->Input()->ParseInputClickedKeys(m_ClientID, pNewInput, m_pLastInput);
+	if(m_pCharacter)
+	{
+		const int ActiveWeapon = m_pCharacter->m_Core.m_ActiveWeapon;
+		Server()->Input()->ProcessCharacterInput(m_ClientID, ActiveWeapon, pNewInput, m_pLastInput);
+	}
+
+	// Reset input when chatting
 	if(pNewInput->m_PlayerFlags & PLAYERFLAG_CHATTING)
 	{
-		// skip the input if chat is active
 		if(m_PlayerFlags & PLAYERFLAG_CHATTING)
 			return;
 
-		// reset input
 		if(m_pCharacter)
 			m_pCharacter->ResetInput();
 
@@ -561,18 +528,17 @@ void CPlayer::OnDirectInput(CNetObj_PlayerInput* pNewInput)
 
 	if(m_pCharacter)
 	{
-		// update afk time
+		// Update AFK status
 		if(g_Config.m_SvMaxAfkTime != 0)
-			m_Afk = (bool)(m_LastPlaytime < time_get() - time_freq() * g_Config.m_SvMaxAfkTime);
+			m_Afk = m_LastPlaytime < time_get() - time_freq() * g_Config.m_SvMaxAfkTime;
 
 		m_pCharacter->OnDirectInput(pNewInput);
 	}
 
-	// check for activity
+	// Check for activity
 	if(mem_comp(pNewInput, m_pLastInput, sizeof(CNetObj_PlayerInput)))
 	{
 		mem_copy(m_pLastInput, pNewInput, sizeof(CNetObj_PlayerInput));
-		// Ignore the first direct input and keep the player afk as it is sent automatically
 		if(m_LastInputInit)
 			m_LastPlaytime = time_get();
 
@@ -592,85 +558,26 @@ void CPlayer::OnPredictedInput(CNetObj_PlayerInput* pNewInput) const
 
 int CPlayer::GetTeam()
 {
-	if(GS()->Mmo()->Account()->IsActive(m_ClientID))
-		return Acc().m_Team;
-	return TEAM_SPECTATORS;
+	return IsAuthed() ? TEAM_RED : TEAM_SPECTATORS;
 }
 
 /* #########################################################################
 	FUNCTIONS PLAYER HELPER
 ######################################################################### */
-void CPlayer::ProgressBar(const char* Name, int MyLevel, int MyExp, int ExpNeed, int GivedExp) const
+void CPlayer::ProgressBar(const char* pType, int Level, uint64_t Exp, uint64_t ExpNeeded, uint64_t GainedExp) const
 {
-	char aBufBroadcast[128];
-	const float GetLevelProgress = translate_to_percent((float)ExpNeed, (float)MyExp);
-	const float GetExpProgress = translate_to_percent((float)ExpNeed, (float)GivedExp);
+	const auto ExpProgress = translate_to_percent(ExpNeeded, Exp);
+	const auto GainedExpProgress = translate_to_percent(ExpNeeded, GainedExp);
 
-	std::string ProgressBar = Tools::String::progressBar(100, (int)GetLevelProgress, 10, ":", " ");
-	str_format(aBufBroadcast, sizeof(aBufBroadcast), "Lv%d %s[%s] %0.2f%%+%0.3f%%(%d)XP", MyLevel, Name, ProgressBar.c_str(), GetLevelProgress, GetExpProgress, GivedExp);
-	GS()->Broadcast(m_ClientID, BroadcastPriority::GAME_INFORMATION, 100, aBufBroadcast);
-}
-
-bool CPlayer::Upgrade(int Value, int* Upgrade, int* Useless, int Price, int MaximalUpgrade) const
-{
-	const int UpgradeNeed = Price * Value;
-	if((*Upgrade + Value) > MaximalUpgrade)
-	{
-		GS()->Broadcast(m_ClientID, BroadcastPriority::GAME_WARNING, 100, "Upgrade has a maximum level.");
-		return false;
-	}
-
-	if(*Useless < UpgradeNeed)
-	{
-		GS()->Broadcast(m_ClientID, BroadcastPriority::GAME_WARNING, 100, "Not upgrade points for +{INT}. Required {INT}.", Value, UpgradeNeed);
-		return false;
-	}
-
-	*Useless -= UpgradeNeed;
-	*Upgrade += Value;
-	return true;
+	// send and format
+	const auto ProgressBar = mystd::string::progressBar(100, static_cast<int>(ExpProgress), 10, ":", " ");
+	const auto Result = fmt_default("Lv{lv} {type}[{bar}] {~.2}%+{~.3}%({})XP", Level, pType, ProgressBar, ExpProgress, GainedExpProgress, GainedExp);
+	GS()->Broadcast(m_ClientID, BroadcastPriority::GameInformation, 100, Result.c_str());
 }
 
 /* #########################################################################
 	FUNCTIONS PLAYER ACCOUNT
 ######################################################################### */
-bool CPlayer::SpendCurrency(int Price, int ItemID)
-{
-	if(Price <= 0)
-		return true;
-
-	CPlayerItem* pItem = GetItem(ItemID);
-	if(pItem->GetValue() < Price)
-	{
-		GS()->Chat(m_ClientID, "Required {VAL}, but you only have {VAL} {STR}!", Price, pItem->GetValue(), pItem->Info()->GetName());
-		return false;
-	}
-	return pItem->Remove(Price);
-}
-
-void CPlayer::GiveEffect(const char* Potion, int Sec, float Chance)
-{
-	if(m_pCharacter && m_pCharacter->IsAlive())
-	{
-		const float RandomChance = random_float(100.0f);
-		if(RandomChance < Chance)
-		{
-			GS()->Chat(m_ClientID, "You got the effect {STR} time {INT} seconds.", Potion, Sec);
-			CGS::ms_aEffects[m_ClientID][Potion] = Sec;
-		}
-	}
-}
-
-bool CPlayer::IsActiveEffect(const char* Potion) const
-{
-	return CGS::ms_aEffects[m_ClientID].count(Potion) > 0;
-}
-
-void CPlayer::ClearEffects()
-{
-	CGS::ms_aEffects[m_ClientID].clear();
-}
-
 const char* CPlayer::GetLanguage() const
 {
 	return Server()->GetClientLanguage(m_ClientID);
@@ -678,82 +585,33 @@ const char* CPlayer::GetLanguage() const
 
 void CPlayer::UpdateTempData(int Health, int Mana)
 {
-	GetTempData().m_TempHealth = Health;
-	GetTempData().m_TempMana = Mana;
-}
-
-void CPlayer::AddExp(int Exp)
-{
-	Acc().m_Exp += Exp;
-	while(Acc().m_Exp >= ExpNeed(Acc().m_Level))
-	{
-		Acc().m_Exp -= ExpNeed(Acc().m_Level);
-		Acc().m_Level++;
-		Acc().m_Upgrade += 1;
-
-		if(m_pCharacter)
-		{
-			GS()->CreateDeath(m_pCharacter->m_Core.m_Pos, m_ClientID);
-			GS()->CreateSound(m_pCharacter->m_Core.m_Pos, 4);
-			GS()->CreateText(m_pCharacter, false, vec2(0, -40), vec2(0, -1), 30, "level up");
-		}
-
-		GS()->Chat(m_ClientID, "Congratulations. You attain level {INT}!", Acc().m_Level);
-		if(Acc().m_Exp < ExpNeed(Acc().m_Level))
-		{
-			GS()->StrongUpdateVotes(m_ClientID, MENU_MAIN);
-			GS()->Mmo()->SaveAccount(this, SAVE_STATS);
-			GS()->Mmo()->SaveAccount(this, SAVE_UPGRADES);
-		}
-	}
-	ProgressBar("Account", Acc().m_Level, Acc().m_Exp, ExpNeed(Acc().m_Level), Exp);
-
-	if(rand() % 5 == 0)
-		GS()->Mmo()->SaveAccount(this, SAVE_STATS);
-
-	if(Acc().IsGuild())
-		GS()->Mmo()->Member()->AddExperience(Acc().m_GuildID);
-}
-
-void CPlayer::AddMoney(int Money)
-{
-	GetItem(itGold)->Add(Money);
-}
-
-bool CPlayer::GetHiddenMenu(int HideID) const
-{
-	if(m_aHiddenMenu.find(HideID) != m_aHiddenMenu.end())
-		return m_aHiddenMenu.at(HideID);
-	return false;
+	auto& TempData = GetTempData();
+	TempData.m_TempHealth = Health;
+	TempData.m_TempMana = Mana;
 }
 
 bool CPlayer::IsAuthed() const
 {
-	if(GS()->Mmo()->Account()->IsActive(m_ClientID))
-		return Acc().GetID() > 0;
+	const auto* pAccountManager = GS()->Core()->AccountManager();
+	if(pAccountManager->IsActive(m_ClientID))
+	{
+		return Account()->GetID() > 0;
+	}
 	return false;
 }
 
-int CPlayer::GetStartTeam() const
+int CPlayer::GetMaxHealth() const
 {
-	if(IsAuthed())
-		return TEAM_RED;
-	return TEAM_SPECTATORS;
+	auto DefaultHP = 10 + GetTotalAttributeValue(AttributeIdentifier::HP);
+	Account()->GetBonusManager().ApplyBonuses(BONUS_TYPE_HP, &DefaultHP);
+	return DefaultHP;
 }
 
-int CPlayer::ExpNeed(int Level)
+int CPlayer::GetMaxMana() const
 {
-	return computeExperience(Level);
-}
-
-int CPlayer::GetStartHealth()
-{
-	return 10 + GetAttributeSize(AttributeIdentifier::HP);
-}
-
-int CPlayer::GetStartMana()
-{
-	return 10 + GetAttributeSize(AttributeIdentifier::MP);
+	auto DefaultMP = 10 + GetTotalAttributeValue(AttributeIdentifier::MP);
+	Account()->GetBonusManager().ApplyBonuses(BONUS_TYPE_MP, &DefaultMP);
+	return DefaultMP;
 }
 
 int64_t CPlayer::GetAfkTime() const
@@ -761,51 +619,56 @@ int64_t CPlayer::GetAfkTime() const
 	return m_Afk ? ((time_get() - m_LastPlaytime) / time_freq()) - g_Config.m_SvMaxAfkTime : 0;
 }
 
-void CPlayer::FormatBroadcastBasicStats(char* pBuffer, int Size, const char* pAppendStr)
+void CPlayer::FormatBroadcastBasicStats(char* pBuffer, int Size, const char* pAppendStr) const
 {
-	if(!IsAuthed() || !m_pCharacter)
+	if(!IsAuthed() || !m_pCharacter || m_PlayerFlags & PLAYERFLAG_IN_MENU)
 		return;
 
-	const int LevelPercent = translate_to_percent(ExpNeed(Acc().m_Level), Acc().m_Exp);
-	const int MaximumHealth = GetStartHealth();
-	const int MaximumMana = GetStartMana();
-	const int Health = m_pCharacter->Health();
-	const int Mana = m_pCharacter->Mana();
-	const int Gold = GetItem(itGold)->GetValue();
+	// information
+	const int LevelPercent = round_to_int(translate_to_percent(computeExperience(Account()->GetLevel()), Account()->GetExperience()));
+	const auto ProgressBar = mystd::string::progressBar(100, LevelPercent, 10, ":", " ");
+	const auto MaxHP = GetMaxHealth();
+	const auto MaxMP = GetMaxMana();
+	const auto HP = m_pCharacter->Health();
+	const auto MP = m_pCharacter->Mana();
+	const auto Bank = Account()->GetBankManager();
+	const auto Gold = Account()->GetGold();
+	const auto GoldCapacity = Account()->GetGoldCapacity();
+	const auto [BonusActivitiesLines, BonusActivitiesStr] = Account()->GetBonusManager().GetBonusActivitiesString();
 
-	char aRecastInfo[32] {};
-	if(m_aPlayerTick[PotionRecast] > Server()->Tick())
+	// result
+	auto Result = fmt_localize(m_ClientID, "\n\n\n\n\nLv{}[{}]\nHP {$}/{$}\nMP {$}/{$}\nGold {$} of {$}\nBank {$}",
+		Account()->GetLevel(), ProgressBar, HP, MaxHP, MP, MaxMP, Gold, GoldCapacity, Bank);
+
+	// recast heal info
+	auto PotionRecastTime = m_aPlayerTick[HealPotionRecast] - Server()->Tick();
+	if(PotionRecastTime > 0)
 	{
-		int Seconds = maximum(0, (m_aPlayerTick[PotionRecast] - Server()->Tick()) / Server()->TickSpeed());
-		str_format(aRecastInfo, sizeof(aRecastInfo), "Potion recast: %d", Seconds);
+		const auto Seconds = std::max(0, PotionRecastTime / Server()->TickSpeed());
+		Result += "\n" + fmt_localize(m_ClientID, "Potion HP recast: {}", Seconds);
 	}
 
-	std::string ProgressBar = Tools::String::progressBar(100, LevelPercent, 10, ":", " ");
-	str_format(pBuffer, Size, "\n\n\n\n\nLv%d[%s]\nHP %d/%d\nMP %d/%d\nGold %s\n%s\n\n\n\n\n\n\n\n\n\n\n%-150s",
-		Acc().m_Level, ProgressBar.c_str(), Health, MaximumHealth, Mana, MaximumMana, get_commas<int>(Gold).c_str(), aRecastInfo, pAppendStr);
-}
-
-void CPlayer::IncreaseRelations(int Relevation)
-{
-	// Check if the player is authenticated and if their relationship level is not already at the maximum.
-	if(IsAuthed() && !Acc().IsRelationshipsDeterioratedToMax())
+	// recast mana info
+	PotionRecastTime = m_aPlayerTick[ManaPotionRecast] - Server()->Tick();
+	if(PotionRecastTime > 0)
 	{
-		// Increase the player's relationship level by the value of Relevation, up to a maximum of 100.
-		Acc().m_Relations = minimum(Acc().m_Relations + Relevation, 100);
-
-		// Display a chat message to the player indicating the new relationship level.
-		GS()->Chat(m_ClientID, "Harmony between characters has plummeted to {INT}%!", Acc().m_Relations);
-
-		// Check if the player's relations with other entities is greater than or equal to 100
-		if(Acc().m_Relations >= 100)
-		{
-			// Display a chat message to the player warning them that they are wanted as a felon
-			GS()->Chat(m_ClientID, "An esteemed criminal like yourself has become the target of an intense manhunt. Be on high alert, for the watchful gaze of vigilant guards is upon you!");
-		}
-
-		// Save the player's account data, specifically the relationship level.
-		GS()->Mmo()->SaveAccount(this, SAVE_RELATIONS);
+		const auto Seconds = std::max(0, PotionRecastTime / Server()->TickSpeed());
+		Result += "\n" + fmt_localize(m_ClientID, "Potion MP recast: {}", Seconds);
 	}
+
+	if(!BonusActivitiesStr.empty())
+	{
+		Result += "\n" + BonusActivitiesStr;
+	}
+
+	constexpr int MaxLines = 20;
+	const auto Lines = std::ranges::count(Result, '\n');
+	if(Lines < MaxLines)
+	{
+		Result.append(MaxLines - Lines, '\n');
+	}
+
+	str_format(pBuffer, Size, "%s%-200s", Result.c_str(), pAppendStr);
 }
 
 /* #########################################################################
@@ -813,48 +676,38 @@ void CPlayer::IncreaseRelations(int Relevation)
 ######################################################################### */
 bool CPlayer::ParseVoteOptionResult(int Vote)
 {
+	// check valid character
 	if(!m_pCharacter)
 	{
 		GS()->Chat(m_ClientID, "Use it when you're not dead!");
 		return true;
 	}
 
-	if(!m_Optionals.empty())
+	// execute is exist vote optional
+	auto& voteOptions = CVoteOptional::Data()[m_ClientID];
+	if(!voteOptions.empty())
 	{
-		CVoteEventOptional* pOptional = &m_Optionals.front();
-		RunEventOptional(Vote, pOptional);
+		CVoteOptional* pOptional = &voteOptions.front();
+		pOptional->ExecuteVote(Vote == 1);
 	}
 
-	// - - - - - F3- - - - - - -
 	if(Vote == 1)
 	{
-		if(m_RequestChangeNickname)
+		// dungeon change ready state
+		if(GS()->IsWorldType(WorldType::Dungeon))
 		{
-			if(GS()->Mmo()->Account()->ChangeNickname(m_ClientID))
-				GS()->Broadcast(m_ClientID, BroadcastPriority::VERY_IMPORTANT, 300, "Your nickname has been successfully updated");
-			else
-				GS()->Broadcast(m_ClientID, BroadcastPriority::VERY_IMPORTANT, 300, "This nickname is already in use");
-
-			m_RequestChangeNickname = false;
+			//const int DungeonID = dynamic_cast<CGameControllerDungeon*>(GS()->m_pController)->GetDungeonID();
+			//if(!CDungeonData::ms_aDungeon[DungeonID].IsDungeonPlaying())
+			//{
+			//	GetTempData().m_TempDungeonReady = !GetTempData().m_TempDungeonReady;
+			//	GS()->Chat(m_ClientID, "You changed the ready mode to \"{}\"!", GetTempData().m_TempDungeonReady ? "ready" : "not ready");
+			//}
 			return true;
 		}
-
-		if(GS()->IsDungeon())
-		{
-			const int DungeonID = GS()->GetDungeonID();
-			if(!CDungeonData::ms_aDungeon[DungeonID].IsDungeonPlaying())
-			{
-				GetTempData().m_TempDungeonReady ^= true;
-				GS()->Chat(m_ClientID, "You changed the ready mode to \"{STR}\"!", GetTempData().m_TempDungeonReady ? "ready" : "not ready");
-			}
-			return true;
-		}
-
 	}
-	// - - - - - F4- - - - - - -
 	else
 	{
-		// conversations
+		// continue dialog
 		if(m_Dialog.IsActive())
 		{
 			if(m_aPlayerTick[LastDialog] && m_aPlayerTick[LastDialog] > GS()->Server()->Tick())
@@ -868,274 +721,232 @@ bool CPlayer::ParseVoteOptionResult(int Vote)
 	}
 	return false;
 }
-// vote parsing and improving statistics
-bool CPlayer::ParseVoteUpgrades(const char* CMD, const int VoteID, const int VoteID2, int Get)
-{
-	if(PPSTR(CMD, "UPGRADE") == 0)
-	{
-		if(Upgrade(Get, &Acc().m_aStats[(AttributeIdentifier)VoteID], &Acc().m_Upgrade, VoteID2, 1000))
-		{
-			GS()->Mmo()->SaveAccount(this, SAVE_UPGRADES);
-			GS()->UpdateVotes(m_ClientID, MENU_UPGRADES);
-		}
-		return true;
-	}
-
-	if(PPSTR(CMD, "BACK") == 0)
-	{
-		// close other tabs after checked new
-		for(auto& [ID, Value] : m_aHiddenMenu)
-		{
-			if(ID > NUM_TAB_MENU)
-				Value = false;
-		}
-
-		GS()->UpdateVotes(m_ClientID, m_LastVoteMenu);
-		return true;
-	}
-
-	if(PPSTR(CMD, "HIDDEN") == 0)
-	{
-		if(VoteID < TAB_STAT)
-			return true;
-
-		// close other tabs after checked new
-		for(auto& [ID, Value] : m_aHiddenMenu)
-		{
-			if((ID > NUM_TAB_MENU && VoteID > NUM_TAB_MENU && ID != VoteID))
-				Value = false;
-		}
-
-		m_aHiddenMenu[VoteID] ^= true;
-		if(m_aHiddenMenu[VoteID] == false)
-			m_aHiddenMenu.erase(VoteID);
-
-		GS()->StrongUpdateVotes(m_ClientID, m_CurrentVoteMenu);
-		return true;
-	}
-	return false;
-}
 
 CPlayerItem* CPlayer::GetItem(ItemIdentifier ID)
 {
-	dbg_assert(CItemDescription::Data().find(ID) != CItemDescription::Data().end(), "invalid referring to the CPlayerItem");
+	const auto& itemsDescription = CItemDescription::Data();
+	dbg_assert(itemsDescription.contains(ID), "invalid referring to the CPlayerItem");
 
-	if(CPlayerItem::Data()[m_ClientID].find(ID) == CPlayerItem::Data()[m_ClientID].end())
+	auto& playerItems = CPlayerItem::Data()[m_ClientID];
+	if(!playerItems.contains(ID))
 	{
 		CPlayerItem(ID, m_ClientID).Init({}, {}, {}, {});
-		return &CPlayerItem::Data()[m_ClientID][ID];
 	}
 
-	return &CPlayerItem::Data()[m_ClientID][ID];
+	return &playerItems[ID];
 }
 
-CSkill* CPlayer::GetSkill(SkillIdentifier ID)
+CSkill* CPlayer::GetSkill(int SkillID) const
 {
-	dbg_assert(CSkillDescription::Data().find(ID) != CSkillDescription::Data().end(), "invalid referring to the CSkillData");
+	const auto& skillsDescription = CSkillDescription::Data();
+	dbg_assert(skillsDescription.contains(SkillID), "invalid referring to the CSkill");
 
-	if(CSkill::Data()[m_ClientID].find(ID) == CSkill::Data()[m_ClientID].end())
+	auto& playerSkills = CSkill::Data()[m_ClientID];
+	const auto iter = std::ranges::find_if(playerSkills, [SkillID](const auto* pSkill)
 	{
-		CSkill(ID, m_ClientID).Init({}, {});
-		return &CSkill::Data()[m_ClientID][ID];
-	}
-
-	return &CSkill::Data()[m_ClientID][ID];
-}
-
-CPlayerQuest* CPlayer::GetQuest(QuestIdentifier ID)
-{
-	dbg_assert(CQuestDescription::Data().find(ID) != CQuestDescription::Data().end(), "invalid referring to the CPlayerQuest");
-
-	if(CPlayerQuest::Data()[m_ClientID].find(ID) == CPlayerQuest::Data()[m_ClientID].end())
-	{
-		CPlayerQuest(ID, m_ClientID).Init({});
-		return &CPlayerQuest::Data()[m_ClientID][ID];
-	}
-
-	return &CPlayerQuest::Data()[m_ClientID][ID];
-}
-
-int CPlayer::GetEquippedItemID(ItemFunctional EquipID, int SkipItemID) const
-{
-	const auto Iter = std::find_if(CPlayerItem::Data()[m_ClientID].begin(), CPlayerItem::Data()[m_ClientID].end(), [EquipID, SkipItemID](const auto& p)
-	{
-		return (p.second.HasItem() && p.second.IsEquipped() && p.second.Info()->IsFunctional(EquipID) && p.first != SkipItemID);
+		return pSkill->GetID() == SkillID;
 	});
-	return Iter != CPlayerItem::Data()[m_ClientID].end() ? Iter->first : -1;
+
+	return (iter == playerSkills.end() ? CSkill::CreateElement(m_ClientID, SkillID) : *iter);
 }
 
-int CPlayer::GetAttributeSize(AttributeIdentifier ID)
+CPlayerQuest* CPlayer::GetQuest(QuestIdentifier ID) const
 {
-	// if the best tank class is selected among the players we return the sync dungeon stats
-	const CAttributeDescription* pAtt = GS()->GetAttributeInfo(ID);
-	if(GS()->IsDungeon() && pAtt->GetUpgradePrice() < 4 && CDungeonData::ms_aDungeon[GS()->GetDungeonID()].IsDungeonPlaying())
+	const auto& questsDescription = CQuestDescription::Data();
+	dbg_assert(questsDescription.contains(ID), "invalid referring to the CPlayerQuest");
+
+	auto& questData = CPlayerQuest::Data()[m_ClientID];
+	if(!questData.contains(ID))
 	{
-		const CGameControllerDungeon* pDungeon = dynamic_cast<CGameControllerDungeon*>(GS()->m_pController);
-		return pDungeon->GetAttributeDungeonSync(this, ID);
+		CPlayerQuest::CreateElement(ID, m_ClientID);
 	}
 
-	// get all attributes from items
-	int Size = 0;
-	for(const auto& [ItemID, ItemData] : CPlayerItem::Data()[m_ClientID])
+	return questData[ID];
+}
+
+std::optional<int> CPlayer::GetEquippedItemID(ItemType EquipType, int SkipItemID) const
+{
+	const auto& playerItems = CPlayerItem::Data()[m_ClientID];
+	for(const auto& [itemID, item] : playerItems)
 	{
-		if(ItemData.IsEquipped() && ItemData.Info()->IsEnchantable() && ItemData.Info()->GetInfoEnchantStats(ID))
+		if(itemID == SkipItemID)
+			continue;
+
+		if(!item.HasItem())
+			continue;
+
+		if(!item.IsEquipped())
+			continue;
+
+		if(!item.Info()->IsType(EquipType))
+			continue;
+
+		return itemID;
+	}
+
+	return std::nullopt;
+}
+
+bool CPlayer::IsEquipped(ItemType EquipID) const
+{
+	const auto& optItemID = GetEquippedItemID(EquipID, -1);
+	return optItemID.has_value();
+}
+
+int CPlayer::GetTotalAttributeValue(AttributeIdentifier ID) const
+{
+	// initialize variables
+	const auto* pAtt = GS()->GetAttributeInfo(ID);
+
+	// check if the player is in a dungeon and the attribute has a low improvement cost
+	if(GS()->IsWorldType(WorldType::Dungeon))
+	{
+		//const auto* pDungeon = dynamic_cast<const CGameControllerDungeon*>(GS()->m_pController);
+		//if(pAtt->GetUpgradePrice() < 4 && CDungeonData::ms_aDungeon[pDungeon->GetDungeonID()].IsDungeonPlaying())
+		//{
+		//	return pDungeon->GetAttributeDungeonSyncByClass(Account()->GetActiveProfessionID(), ID);
+		//}
+	}
+
+	// counting attributes from equipped items
+	int totalValue = 0;
+	for(const auto& [ItemID, PlayerItem] : CPlayerItem::Data()[m_ClientID])
+	{
+		// required repair
+		if(PlayerItem.GetDurability() <= 0)
+			continue;
+
+		// if is equipped and enchantable add attribute
+		if(PlayerItem.IsEquipped() && PlayerItem.Info()->IsEnchantable())
 		{
-			Size += ItemData.GetEnchantStats(ID);
+			totalValue += PlayerItem.GetEnchantStats(ID);
 		}
 	}
 
-	// if the attribute has the value of player upgrades we sum up
-	if(pAtt->HasDatabaseField())
-		Size += Acc().m_aStats[ID];
+	// add attribute for other profession
+	for(const auto& Prof : Account()->GetProfessions())
+	{
+		if(Prof.IsProfessionType(PROFESSION_TYPE_OTHER))
+			totalValue += Prof.GetAttributeValue(ID);
+	}
 
-	return Size;
+	// add attribute for active profession
+	if(const auto* pClassProf = Account()->GetActiveProfession())
+	{
+		totalValue += pClassProf->GetAttributeValue(ID);
+		totalValue += translate_to_percent_rest(totalValue, pClassProf->GetExtraBoostAttribute(ID));
+	}
+
+	return totalValue;
 }
 
-float CPlayer::GetAttributePercent(AttributeIdentifier ID)
+float CPlayer::GetAttributeChance(AttributeIdentifier ID) const
 {
-	float Percent = 0.0f;
-	int Size = GetAttributeSize(ID);
+	// use a lambda to calculate chance
+	int attributeValue = GetTotalAttributeValue(ID);
+	auto calculateChance = [attributeValue](float base, float multiplier, float max)
+	{
+		return std::min(base + static_cast<float>(attributeValue) * multiplier, max);
+	};
 
-	if(ID == AttributeIdentifier::Vampirism)
-		Percent = minimum(8.0f + (float)Size * 0.0015f, 30.0f);
-	if(ID == AttributeIdentifier::Crit)
-		Percent = minimum(8.0f + (float)Size * 0.0015f, 30.0f);
-	if(ID == AttributeIdentifier::Lucky)
-		Percent = minimum(5.0f + (float)Size * 0.0015f, 20.0f);
-	return Percent;
+	// chance
+	switch(ID)
+	{
+		case AttributeIdentifier::Vampirism:
+		case AttributeIdentifier::Crit:
+			return calculateChance(8.0f, 0.0015f, 30.0f);
+
+		case AttributeIdentifier::Lucky:
+			return calculateChance(5.0f, 0.0015f, 20.0f);
+
+		default:
+			return 0.f;
+	}
 }
 
-int CPlayer::GetTypeAttributesSize(AttributeType Type)
+int CPlayer::GetTotalAttributesInGroup(AttributeGroup Type) const
 {
-	int Size = 0;
+	int totalSize = 0;
+
+	// iterate over all attributes by group and sum their values
 	for(const auto& [ID, pAttribute] : CAttributeDescription::Data())
 	{
-		if(pAttribute->IsType(Type))
-			Size += GetAttributeSize(ID);
+		if(pAttribute->IsGroup(Type))
+		{
+			totalSize += GetTotalAttributeValue(ID);
+		}
 	}
-	return Size;
+	return totalSize;
 }
 
-int CPlayer::GetAttributesSize()
+int CPlayer::GetTotalAttributes() const
 {
-	int Size = 0;
-	for(const auto& [ID, Attribute] : CAttributeDescription::Data())
-		Size += GetAttributeSize(ID);
+	int totalSize = 0;
 
-	return Size;
+	// iterate over all attributes and sum their values
+	for(const auto& attributeID : CAttributeDescription::Data() | std::views::keys)
+	{
+		totalSize += GetTotalAttributeValue(attributeID);
+	}
+
+	return totalSize;
 }
 
 void CPlayer::SetSnapHealthTick(int Sec)
 {
-	m_SnapHealthTick = Server()->Tick() + (Server()->TickSpeed() * Sec);
+	m_SnapHealthNicknameTick = Server()->Tick() + (Server()->TickSpeed() * Sec);
 }
 
-void CPlayer::ChangeWorld(int WorldID)
+void CPlayer::ChangeWorld(int WorldID, std::optional<vec2> newWorldPosition) const
 {
-	// reset dungeon temp data
-	GetTempData().m_TempAlreadyVotedDungeon = false;
-	GetTempData().m_TempDungeonReady = false;
-	GetTempData().m_TempTankVotingDungeon = 0;
-	GetTempData().m_TempTimeDungeon = 0;
+	// reset dungeon temporary data
+	auto& tempData = GetTempData();
+	tempData.m_TempDungeonReady = false;
+	tempData.m_TempTimeDungeon = 0;
 
-	// change worlds
-	Acc().m_aHistoryWorld.push_front(WorldID);
+	// if new position is provided, set the teleport position
+	if(newWorldPosition.has_value())
+	{
+		tempData.SetSpawnPosition(newWorldPosition.value());
+	}
+
+	// change the player's world
+	Account()->m_aHistoryWorld.push_front(WorldID);
 	Server()->ChangeWorld(m_ClientID, WorldID);
 }
 
-int CPlayer::GetPlayerWorldID() const
+int CPlayer::GetCurrentWorldID() const
 {
 	return Server()->GetClientWorldID(m_ClientID);
 }
 
-CTeeInfo& CPlayer::GetTeeInfo() const
+const CTeeInfo& CPlayer::GetTeeInfo() const
 {
-	return Acc().m_TeeInfos;
+	return Account()->GetTeeInfo();
 }
 
-// Function to create a vote event with optional parameters
-// Takes in a value, duration in seconds, information string, and variable arguments
-CVoteEventOptional* CPlayer::CreateVoteOptional(int OptionID, int OptionID2, int Sec, const char* pInformation, ...)
+void CPlayer::StartUniversalScenario(const std::string& ScenarioData, int ScenarioID)
 {
-	// Create an instance of the CVoteEventOptional class
-	CVoteEventOptional Optional;
-	Optional.m_CloseTime = time_get() + time_freq() * Sec;
-	Optional.m_OptionID = OptionID;
-	Optional.m_OptionID2 = OptionID2;
-
-	// Format the information string using localization and variable arguments
-	va_list VarArgs;
-	va_start(VarArgs, pInformation);
-	dynamic_string Buffer;
-	Server()->Localization()->Format_VL(Buffer, GetLanguage(), pInformation, VarArgs);
-	Optional.m_Description = Buffer.buffer();
-	Buffer.clear();
-	va_end(VarArgs);
-
-	// Add the vote event to the list of optionals
-	m_Optionals.push(Optional);
-
-	// Return a pointer to the newly created vote event
-	return &m_Optionals.back();
-}
-
-// This function is a member function of the CPlayer class.
-// It is used to run an optional voting event for the player.
-void CPlayer::RunEventOptional(int Option, CVoteEventOptional* pOptional)
-{
-	// Check if pOptional pointer exists and its callback function returns true
-	if(pOptional && pOptional->Run(this, Option <= 0 ? false : true))
-	{
-		// Create a new network message to update the vote status
-		CNetMsg_Sv_VoteStatus Msg;
-		Msg.m_Total = 1;
-		Msg.m_Yes = (Option >= 1 ? 1 : 0);
-		Msg.m_No = (Option <= 0 ? 1 : 0);
-		Msg.m_Pass = 0;
-
-		// Send the network message to the client with the MSGFLAG_VITAL flag
-		Server()->SendPackMsg(&Msg, MSGFLAG_VITAL, m_ClientID);
-
-		// Set the close time of pOptional to half a second from the current time
-		pOptional->m_CloseTime = time_get() + (time_freq() / 2);
-	}
-}
-
-// Function to handle optional voting options for a player
-void CPlayer::HandleVoteOptionals()
-{
-	// If the list of optionals is empty, return
-	if(m_Optionals.empty())
+	if(ScenarioData.empty())
 		return;
 
-	// Get a pointer to the first optional in the list
-	CVoteEventOptional* pOptional = &m_Optionals.front();
-
-	// If the optional is not already being processed
-	if(!pOptional->m_Working)
+	// parse scenario
+	mystd::json::parse(ScenarioData, [ScenarioID, this](nlohmann::json& pJson)
 	{
-		// Create a vote set message and send the message to the client
-		CNetMsg_Sv_VoteSet Msg;
-		Msg.m_Timeout = (pOptional->m_CloseTime - time_get()) / time_freq();
-		Msg.m_pDescription = pOptional->m_Description.c_str();
-		Msg.m_pReason = "\0";
-		Server()->SendPackMsg(&Msg, MSGFLAG_VITAL, m_ClientID);
+		std::string ObjElem {};
+		switch(ScenarioID)
+		{
+			case SCENARIO_ON_DIALOG_RECIEVE_OBJECTIVES: ObjElem = "on_recieve_objectives"; break;
+			case SCENARIO_ON_DIALOG_COMPLETE_OBJECTIVES: ObjElem = "on_complete_objectives"; break;
+			case SCENARIO_ON_END_STEP: ObjElem = "on_end"; break;
+			case SCENARIO_ON_ITEM_EQUIP: ObjElem = "on_equip"; break;
+			case SCENARIO_ON_ITEM_GOT: ObjElem = "on_got"; break;
+			case SCENARIO_ON_ITEM_LOST: ObjElem = "on_lost"; break;
+			case SCENARIO_ON_ITEM_UNEQUIP: ObjElem = "on_unequip"; break;
+		}
 
-		// Mark the optional as being processed
-		pOptional->m_Working = true;
-	}
-
-	// If the closing time of the optional has not passed yet
-	if(pOptional->m_CloseTime < time_get())
-	{
-		// Create a vote set message with timeout 0 and send the message to the client
-		CNetMsg_Sv_VoteSet Msg;
-		Msg.m_Timeout = 0;
-		Msg.m_pDescription = "";
-		Msg.m_pReason = "";
-		Server()->SendPackMsg(&Msg, MSGFLAG_VITAL, m_ClientID);
-
-		// Remove the first optional from the list
-		m_Optionals.pop();
-	}
+		// start scenario
+		const auto& scenarioJsonData = ObjElem.empty() ? pJson : pJson[ObjElem];
+		Scenarios().Start(std::make_unique<CUniversalScenario>(ScenarioID, scenarioJsonData));
+	});
 }

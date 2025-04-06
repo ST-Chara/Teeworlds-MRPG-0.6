@@ -7,6 +7,7 @@
 #include <engine/server.h>
 
 #include <engine/shared/econ.h>
+#include <engine/shared/http.h>
 #include <engine/shared/network.h>
 #include <engine/shared/protocol.h>
 #include <engine/shared/snapshot.h>
@@ -28,15 +29,16 @@ class CServer : public IServer
 	class IStorageEngine* m_pStorage {};
 	class CMultiWorlds* m_pMultiWorlds;
 	class CServerBan* m_pServerBan;
-	class DiscordJob* m_pDiscord {};
-	class IRegister* m_pRegister;
+	class IRegister* m_pRegister{};
 
 public:
-	class IGameServer* GameServer(int WorldID = 0) override;
-	class IGameServer* GameServerPlayer(int ClientID) override;
+	class IGameServer* GameServer(int WorldID = 0) const override;
+	class IGameServer* GameServerPlayer(int ClientID) const override;
 	class IConsole* Console() const { return m_pConsole; }
 	class IStorageEngine* Storage() const { return m_pStorage; }
 	class CMultiWorlds* MultiWorlds() const { return m_pMultiWorlds; }
+	class CLocalization* Localization() const override { return m_pLocalization; }
+	class IInputEvents* Input() const override;
 
 	enum
 	{
@@ -82,7 +84,6 @@ public:
 		int m_CurrentInput;
 
 		char m_aName[MAX_NAME_LENGTH];
-		char m_aNameChangeRequest[MAX_NAME_LENGTH];
 		char m_aNameTransfersPrefix[MAX_NAME_LENGTH];
 
 		char m_aClan[MAX_CLAN_LENGTH];
@@ -93,6 +94,9 @@ public:
 		int m_Score;
 		int m_Authed;
 		int m_AuthTries;
+
+		char m_aContinent[32];
+		char m_aCountryIsoCode[8];
 
 		int m_WorldID;
 		int m_OldWorldID;
@@ -118,11 +122,14 @@ public:
 	CClient m_aClients[MAX_CLIENTS];
 	int m_aIdMap[MAX_CLIENTS * VANILLA_MAX_CLIENTS] {};
 
+	class CInputEvents* m_pInputKeys;
+	CLocalization* m_pLocalization;
 	CSnapshotDelta m_SnapshotDelta;
 	CSnapshotBuilder m_SnapshotBuilder;
 	CSnapIDPool m_IDPool;
 	CNetServer m_NetServer;
 	CEcon m_Econ;
+	CHttp m_Http;
 
 	int64_t m_GameStartTime {};
 	int m_RunServer;
@@ -149,17 +156,16 @@ public:
 	// world time
 	int m_ShiftTime;
 	int m_LastShiftTick;
-	int m_WorldMinute {};
-	int m_WorldHour {};
-	bool m_IsNewMinute {};
+	int m_GameMinuteTime {};
+	int m_GameHourTime {};
+	int m_GameTypeday {};
 
-	int GetMinuteWorldTime() const override;
-	int GetHourWorldTime() const override;
-	int GetOffsetWorldTime() const override;
-	void SetOffsetWorldTime(int Hour) override;
-	bool CheckWorldTime(int Hour, int Minute) override;
-	const char* GetStringTypeDay() const override;
-	int GetEnumTypeDay() const override;
+	int GetMinuteGameTime() const override;
+	int GetHourGameTime() const override;
+	int GetOffsetGameTime() const override;
+	void SetOffsetGameTime(int Hour) override;
+	const char* GetStringTypeday() const override;
+	int GetCurrentTypeday() const override;
 
 	// basic
 	void SetClientName(int ClientID, const char* pName) override;
@@ -167,23 +173,20 @@ public:
 	void SetClientCountry(int ClientID, int Country) override;
 	void SetClientScore(int ClientID, int Score) override;
 
-	void SetClientNameChangeRequest(int ClientID, const char* pName) override;
-	const char* GetClientNameChangeRequest(int ClientID) override;
-
-	bool IsClientChangesWorld(int ClientID) override;
+	bool IsClientChangingWorld(int ClientID) override;
 	void ChangeWorld(int ClientID, int NewWorldID) override;
-	int GetClientWorldID(int ClientID) override;
+	int GetClientWorldID(int ClientID) const override;
 
+	const char* ClientContinent(int ClientID) const override;
+	const char* ClientCountryIsoCode(int ClientID) const override;
+
+	const char* Localize(int ClientID, const char* pText) override;
 	void SetClientLanguage(int ClientID, const char* pLanguage) override;
 	const char* GetClientLanguage(int ClientID) const override;
 	const char* GetWorldName(int WorldID) override;
+	CWorldDetail* GetWorldDetail(int WorldID) override;
+	bool IsWorldType(int WorldID, WorldType Type) const override;
 	int GetWorldsSize() const override;
-
-	void SendDiscordMessage(const char* pChannel, int Color, const char* pTitle, const char* pText) override;
-	void SendDiscordGenerateMessage(const char* pTitle, int AccountID, int Color = 0) override;
-	void UpdateDiscordStatus(const char* pStatus) override;
-	std::string EscapeDiscordMarkdown(const std::string& input) override;
-
 	void Kick(int ClientID, const char* pReason) override;
 
 	int64_t TickStartTime(int Tick) const;
@@ -210,9 +213,11 @@ public:
 	const char* ClientClan(int ClientID) const override;
 	int ClientCountry(int ClientID) const override;
 	bool ClientIngame(int ClientID) const override;
+	int GetClientLatency(int ClientID) const override;
 
 	int GetClientVersion(int ClientID) const override;
 	int SendMsg(CMsgPacker* pMsg, int Flags, int ClientID, int64_t Mask = -1, int WorldID = -1) override;
+	int SendMotd(int ClientID, const char *pText) override;
 
 	void DoSnapshot(int WorldID);
 
@@ -248,11 +253,11 @@ public:
 	void UpdateRegisterServerInfo();
 	void UpdateServerInfo(bool Resend = false);
 
-	void PumpNetwork();
+	void PumpNetwork(bool PacketWaiting);
 
 	bool LoadMap(int ID);
 
-	int Run();
+	int Run(ILogger* pLogger);
 
 	static void ConKick(IConsole::IResult* pResult, void* pUser);
 	static void ConStatus(IConsole::IResult* pResult, void* pUser);
@@ -267,6 +272,8 @@ public:
 	static void ConchainLoglevel(IConsole::IResult* pResult, void* pUserData, IConsole::FCommandCallback pfnCallback, void* pCallbackUserData);
 	static void ConchainStdoutOutputLevel(IConsole::IResult* pResult, void* pUserData, IConsole::FCommandCallback pfnCallback, void* pCallbackUserData);
 
+	static std::string CallbackLocalize(int ClientID, const char* pText, void* pUser);
+
 	void RegisterCommands();
 
 	// Bots
@@ -279,13 +286,25 @@ public:
 
 	int* GetIdMap(int ClientID) override;
 
-	void AddAccountNickname(int UID, std::string Nickname) override;
+	void UpdateAccountBase(int UID, std::string Nickname, int Rating) override;
 	const char* GetAccountNickname(int AccountID) override;
+	int GetAccountRank(int AccountID) override;
 
 	void SetLoggers(std::shared_ptr<ILogger>&& pFileLogger, std::shared_ptr<ILogger>&& pStdoutLogger);
 private:
-	ska::unordered_map<int, std::string> m_aAccountsNicknames{};
-	void InitAccountNicknames();
+	struct BaseAccount
+	{
+		std::string Nickname {};
+		int Rating {};
+
+		bool operator<(const BaseAccount& other) const 
+		{
+			return Rating > other.Rating;
+		}
+	};
+	ska::unordered_map<int, BaseAccount> m_vBaseAccounts{};
+	std::set<BaseAccount> m_vSortedRankAccounts{};
+	void InitBaseAccounts();
 };
 
 extern CServer* CreateServer();

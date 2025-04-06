@@ -6,7 +6,7 @@
 #include <game/server/entity.h>
 #include <game/server/gamecontroller.h>
 
-#include <game/server/mmocore/Components/Dungeons/DungeonData.h>
+#include <game/server/core/components/dungeons/dungeon_data.h>
 
 enum DungeonState
 {
@@ -20,23 +20,21 @@ enum DungeonState
 class DungeonDoor;
 class CGameControllerDungeon : public IGameController
 {
-	DungeonDoor *m_DungeonDoor;
-	int m_StateDungeon;
-	int m_DungeonID;
-	int m_WorldID;
+	DungeonDoor* m_DungeonDoor {};
+	int m_StateDungeon {};
+	int m_DungeonID {};
+	int m_WorldID {};
 
-	int m_ActivePlayers;
-	int m_TankClientID;
-	int m_SyncDungeon;
+	int m_ActivePlayers {};
+	int m_TankClientID {};
+	int m_SyncDungeon {};
 
-	int m_LastStartingTick;
-	int m_StartingTick;
-	int m_FinishedTick;
-	int m_SafeTick;
-	int m_MaximumTick;
-	int m_ShiftRoundStartTick;
-
-	CPlayerDungeonRecord m_Records[MAX_PLAYERS];
+	int m_LastStartingTick {};
+	int m_StartingTick {};
+	int m_FinishedTick {};
+	int m_SafeTick {};
+	int m_MaximumTick {};
+	int m_ShiftRoundStartTick {};
 
 public:
 	CGameControllerDungeon(class CGS* pGameServer);
@@ -44,13 +42,11 @@ public:
 	void Tick() override;
 	void Snap() override;
 
-	bool OnEntity(int Index, vec2 Pos) override;
-	void OnCharacterDamage(CPlayer* pFrom, CPlayer* pTo, int Damage) override;
-	void OnCharacterDeath(class CCharacter* pVictim, class CPlayer* pKiller, int Weapon) override;
+	void OnCharacterDeath(class CPlayer* pVictim, class CPlayer* pKiller, int Weapon) override;
 	bool OnCharacterSpawn(class CCharacter* pChr) override;
-	void CreateLogic(int Type, int Mode, vec2 Pos, int ParseID) override;
-	int GetAttributeDungeonSync(class CPlayer* pPlayer, AttributeIdentifier ID) const;
+	int GetAttributeDungeonSyncByClass(ProfessionIdentifier ProfID, AttributeIdentifier ID) const;
 	int GetSyncFactor() const;
+	int GetDungeonID() const { return m_DungeonID; }
 
 private:
 	int PlayersReady() const;
@@ -65,13 +61,11 @@ private:
 
 	void UpdateDoorKeyState();
 	void ResetDoorKeyState();
-	void SelectTankPlayer();
-
 };
 
 class DungeonDoor : public CEntity
 {
-	int m_State;
+	int m_State {};
 public:
 	DungeonDoor(CGameWorld *pGameWorld, vec2 Pos);
 

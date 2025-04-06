@@ -2,9 +2,8 @@
 /* If you are missing that file, acquire a complete release at teeworlds.com.                */
 #include "tutorial.h"
 
+#include <game/server/core/scenarios/scenario_universal.h>
 #include <game/server/gamecontext.h>
-
-#include "game/server/mmocore/Components/Tutorial/TutorialManager.h"
 
 CGameControllerTutorial::CGameControllerTutorial(class CGS* pGS)
 	: IGameController(pGS)
@@ -12,29 +11,33 @@ CGameControllerTutorial::CGameControllerTutorial(class CGS* pGS)
 	m_GameFlags = 0;
 }
 
+void CGameControllerTutorial::OnInit()
+{
+	ByteArray RawData;
+	if(!mystd::file::load("server_data/tutorial_data.json", &RawData))
+		return;
+
+	// initialize jsonData
+	const std::string jsonRawData = (char*)RawData.data();
+	try
+	{
+		m_JsonTutorialData = nlohmann::json::parse(jsonRawData);
+	}
+	catch(const nlohmann::json::parse_error& e)
+	{
+		dbg_msg("scenario-tutorial", "JSON parsing error: %s", e.what());
+	}
+}
+
 void CGameControllerTutorial::Tick()
 {
 	IGameController::Tick();
-
-	// handle tutorial world
-	for(int i = 0; i < MAX_PLAYERS; i++)
-	{
-		if(GS()->IsPlayerEqualWorld(i))
-		{
-			if(CPlayer* pPlayer = GS()->GetPlayer(i, true, true); pPlayer)
-			{
-				CTutorialManager* pTutorialManager = GS()->Mmo()->Tutorial();
-				pTutorialManager->HandleTutorial(pPlayer);
-
-				if(pPlayer->m_TutorialStep >= pTutorialManager->GetSize() && !pPlayer->GetItem(itAdventurersBadge)->HasItem())
-					pPlayer->GetItem(itAdventurersBadge)->Add(1);
-			}
-		}
-	}
 }
 
 bool CGameControllerTutorial::OnCharacterSpawn(CCharacter* pChr)
 {
+	// start tutorial scenario
+	pChr->GetPlayer()->StartUniversalScenario(m_JsonTutorialData.dump(), EScenarios::SCENARIO_TUTORIAL);
 	return IGameController::OnCharacterSpawn(pChr);
 }
 

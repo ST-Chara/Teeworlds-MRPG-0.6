@@ -254,14 +254,14 @@ bool mem_has_null(const void *block, size_t size)
 	return false;
 }
 
-IOHANDLE io_open_impl(const char *filename, int flags)
+IOHANDLE io_open(const char* filename, int flags)
 {
-	dbg_assert(flags == (IOFLAG_READ | IOFLAG_SKIP_BOM) || flags == IOFLAG_READ || flags == IOFLAG_WRITE || flags == IOFLAG_APPEND, "flags must be read, read+skipbom, write or append");
+	dbg_assert(flags == IOFLAG_READ || flags == IOFLAG_WRITE || flags == IOFLAG_APPEND, "flags must be read, write or append");
 #if defined(CONF_FAMILY_WINDOWS)
 	const std::wstring wide_filename = windows_utf8_to_wide(filename);
 	DWORD desired_access;
 	DWORD creation_disposition;
-	const char *open_mode;
+	const char* open_mode;
 	if((flags & IOFLAG_READ) != 0)
 	{
 		desired_access = FILE_READ_DATA;
@@ -271,7 +271,7 @@ IOHANDLE io_open_impl(const char *filename, int flags)
 	else if(flags == IOFLAG_WRITE)
 	{
 		desired_access = FILE_WRITE_DATA;
-		creation_disposition = OPEN_ALWAYS;
+		creation_disposition = CREATE_ALWAYS;
 		open_mode = "wb";
 	}
 	else if(flags == IOFLAG_APPEND)
@@ -290,11 +290,11 @@ IOHANDLE io_open_impl(const char *filename, int flags)
 		return nullptr;
 	const int file_descriptor = _open_osfhandle((intptr_t)handle, 0);
 	dbg_assert(file_descriptor != -1, "_open_osfhandle failure");
-	FILE *file_stream = _fdopen(file_descriptor, open_mode);
+	FILE* file_stream = _fdopen(file_descriptor, open_mode);
 	dbg_assert(file_stream != nullptr, "_fdopen failure");
 	return file_stream;
 #else
-	const char *open_mode;
+	const char* open_mode;
 	if((flags & IOFLAG_READ) != 0)
 	{
 		open_mode = "rb";
@@ -314,21 +314,6 @@ IOHANDLE io_open_impl(const char *filename, int flags)
 	}
 	return fopen(filename, open_mode);
 #endif
-}
-
-IOHANDLE io_open(const char *filename, int flags)
-{
-	IOHANDLE result = io_open_impl(filename, flags);
-	unsigned char buf[3];
-	if((flags & IOFLAG_SKIP_BOM) == 0 || !result)
-	{
-		return result;
-	}
-	if(io_read(result, buf, sizeof(buf)) != 3 || buf[0] != 0xef || buf[1] != 0xbb || buf[2] != 0xbf)
-	{
-		io_seek(result, 0, IOSEEK_START);
-	}
-	return result;
 }
 
 unsigned io_read(IOHANDLE io, void *buffer, unsigned size)
@@ -1460,6 +1445,7 @@ std::string windows_format_system_message(unsigned long error)
 	LocalFree(wide_message);
 	return message;
 }
+
 #endif
 
 static int priv_net_create_socket(int domain, int type, struct sockaddr *addr, int sockaddrlen)
@@ -2719,6 +2705,42 @@ ETimeSeason time_season()
 	}
 }
 
+static inline void str_reverse_impl(char* start, char* end)
+{
+	while(start < end)
+	{
+		char c = *start;
+		*start++ = *end;
+		*end-- = c;
+	}
+}
+
+static inline char* str_reverse_utf8_char_impl(char* start)
+{
+	char* end = start;
+	while((end[1] & 0xC0) == 0x80) end++;
+	str_reverse_impl(start, end);
+	return(end + 1);
+}
+
+void str_utf8_reverse(char* string)
+{
+	char* end = string;
+	while(*end) end = str_reverse_utf8_char_impl(end);
+	str_reverse_impl(string, end - 1);
+}
+
+const char* str_lower(char* string)
+{
+	while(*string)
+	{
+		if(*string >= 'A' && *string <= 'Z')
+			*string += 32;
+		string++;
+	}
+	return string;
+}
+
 void str_append(char *dst, const char *src, int dst_size)
 {
 	int s = str_length(dst);
@@ -2765,8 +2787,9 @@ void str_append_num(char* dst, const char* src, int dst_size, int num)
 	dst[dst_size - 1] = 0; /* assure null termination */
 }
 
-void str_replace(char* str, const char* from, const char* to)
+int str_replace(char* str, const char* from, const char* to)
 {
+	int result = 0;
 	int len = str_length(from);
 	char* found = strstr(str, from);
 	while(found)
@@ -2774,7 +2797,9 @@ void str_replace(char* str, const char* from, const char* to)
 		memmove(found + str_length(to), found + len, str_length(found + len) + 1);
 		memcpy(found, to, str_length(to));
 		found = strstr(found + str_length(to), from);
+		result = 1;
 	}
+	return result;
 }
 
 void str_utf8_truncate(char *dst, int dst_size, const char *src, int truncation_len)
@@ -3848,18 +3873,6 @@ int str_utf8_encode(char *ptr, int chr)
 	}
 
 	return 0;
-}
-
-void str_translation_utf8_to_cp(char* str)
-{
-	// const char because the utf character can have different sizes in bytes
-	const char* translate_from[] = { "А", "а", "С", "с", "Е", "е", "О", "о", "М", "Х", "х", "В", "К", "у", "Т", "Р", "р", "З", "Д", "и" }; // utf rus / uk / kaz, and other
-	const char* translate_to[] = { "A", "a", "C", "c", "E", "e", "O", "o", "M", "X", "x", "B", "K", "y", "T", "P", "p", "3", "D", "u" };
-	for(int i = 0; i < 20; i++)
-	{
-		// TODO: correct it, this construction runs on one line more than 20 times
-		str_replace(str, translate_from[i], translate_to[i]);
-	}
 }
 
 static unsigned char str_byte_next(const char **ptr)

@@ -149,6 +149,7 @@ MACRO_CONFIG_STR(SvName, sv_name, 128, "unnamed server", CFGFLAG_SERVER, "Server
 MACRO_CONFIG_STR(Bindaddr, bindaddr, 128, "", CFGFLAG_CLIENT | CFGFLAG_SERVER | CFGFLAG_MASTER, "Address to bind the client/server to")
 MACRO_CONFIG_INT(SvIpv4Only, sv_ipv4only, 0, 0, 1, CFGFLAG_SERVER, "Whether to bind only to ipv4, otherwise bind to all available interfaces")
 MACRO_CONFIG_INT(SvPort, sv_port, 0, 0, 0, CFGFLAG_SERVER, "Port to use for the server (Only ports 8303-8310 work in LAN server browser, 0 to automatically find a free port in 8303-8310)")
+MACRO_CONFIG_STR(SvGamemodeName, sv_gamemode_name, 16, "MRPG", CFGFLAG_SERVER, "Gamemode name what used MRPG core.")
 MACRO_CONFIG_STR(SvMap, sv_map, 128, "Multiworlds", CFGFLAG_SERVER, "Map name to use on the server")
 MACRO_CONFIG_INT(SvMaxClientsPerIP, sv_max_clients_per_ip, 4, 1, MAX_CLIENTS, CFGFLAG_SERVER, "Maximum number of clients with the same IP that can connect to the server")
 MACRO_CONFIG_INT(SvHighBandwidth, sv_high_bandwidth, 0, 0, 1, CFGFLAG_SERVER, "Use high bandwidth mode. Doubles the bandwidth required for the server. LAN use only")
@@ -162,11 +163,11 @@ MACRO_CONFIG_INT(SvRconBantime, sv_rcon_bantime, 5, 0, 1440, CFGFLAG_SERVER, "Th
 MACRO_CONFIG_INT(SvVanillaAntiSpoof, sv_vanilla_antispoof, 1, 0, 1, CFGFLAG_SERVER, "Enable vanilla Antispoof")
 MACRO_CONFIG_INT(SvServerInfoPerSecond, sv_server_info_per_second, 50, 0, 10000, CFGFLAG_SERVER, "Maximum number of complete server info responses that are sent out per second (0 for no limit)")
 MACRO_CONFIG_INT(SvVanConnPerSecond, sv_van_conn_per_second, 10, 0, 10000, CFGFLAG_SERVER, "Antispoof specific ratelimit (0 for no limit)")
-MACRO_CONFIG_INT(SvSkillLevel, sv_skill_level, 1, SERVERINFO_LEVEL_MIN, SERVERINFO_LEVEL_MAX, CFGFLAG_SERVER, "Difficulty level for Teeworlds 0.7 (0: Casual, 1: Normal, 2: Competitive)")
 
 MACRO_CONFIG_INT(SvHardresetAfterDays, sv_hard_reset_after_days, 7, 1, 14, CFGFLAG_SAVE | CFGFLAG_SERVER, "Reset the server when it has been idle for a specified number of days without players")
 MACRO_CONFIG_INT(SvMaxAfkTime, sv_max_afk_time, 600, 0, 144400, CFGFLAG_SAVE | CFGFLAG_SERVER, "Afk timer")
 MACRO_CONFIG_INT(SvMapDownloadSpeed, sv_map_download_speed, 8, 1, 16, CFGFLAG_SAVE | CFGFLAG_SERVER, "Number of map data packages a client gets on each request")
+MACRO_CONFIG_INT(SvShowWorldWhenConnect, sv_show_world_when_connect, 0, 0, ENGINE_MAX_WORLDS, CFGFLAG_SERVER, "Show default world when player connect")
 
 MACRO_CONFIG_STR(EcBindaddr, ec_bindaddr, 128, "localhost", CFGFLAG_ECON, "Address to bind the external console to. Anything but 'localhost' is dangerous")
 MACRO_CONFIG_INT(EcPort, ec_port, 0, 0, 0, CFGFLAG_ECON, "Port to use for the external console")
@@ -250,7 +251,7 @@ MACRO_CONFIG_STR(ClRunOnJoin, cl_run_on_join, 100, "", CFGFLAG_CLIENT | CFGFLAG_
 // menu background map
 MACRO_CONFIG_STR(SvResetFile, sv_reset_file, 128, "reset.cfg", CFGFLAG_SERVER, "File to execute on map change or reload to set the default server settings")
 MACRO_CONFIG_STR(SvInputFifo, sv_input_fifo, 128, "", CFGFLAG_SERVER, "Fifo file (non-Windows) or Named Pipe (Windows) to use as input for server console")
-
+MACRO_CONFIG_STR(SvDefaultLanguage, sv_default_language, 64, "en", CFGFLAG_SERVER, "Default language")
 
 // these might need some fine tuning
 MACRO_CONFIG_STR(SvBannedVersions, sv_banned_versions, 128, "", CFGFLAG_SERVER, "Comma separated list of banned clients to be kicked on join")

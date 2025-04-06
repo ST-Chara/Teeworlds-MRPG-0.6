@@ -1,9 +1,6 @@
-#ifndef SHARED_STDAFX_H
-#define SHARED_STDAFX_H
+#ifndef GAME_TEEOTHER_STDAFX_SHARED_H
+#define GAME_TEEOTHER_STDAFX_SHARED_H
 
-//TODO: add precompiled headers
-
-// core
 #include <atomic>
 #include <vector>
 #include <list>
@@ -16,14 +13,30 @@
 #include <memory>
 #include <future>
 #include <queue>
+#include <set>
+#include <random>
+#include <ranges>
+#include <optional>
+#include <variant>
 
-// custom something that is subject to less changes is introduced
+#include <teeother/tools/flat_hash_map/bytell_hash_map.h>
+#include <teeother/tools/flat_hash_map/flat_hash_map.h>
+#include <teeother/tools/flat_hash_map/unordered_map.h>
+#include <teeother/tools/nlohmann_json.h>
+#include <teeother/tools/chance_processor.h>
+#include <teeother/tools/dbset.h>
+
+#include <base/system.h>
+#include <base/big_int.h>
+#include <base/format.h>
+#include <base/hash.h>
 #include <base/math.h>
 #include <base/vmath.h>
 #include <base/threadpool.h>
 #include <base/tl/array.h>
 #include <engine/shared/protocol.h>
 #include <generated/protocol.h>
-#include <teeother/tl/nlohmann_json.h>
+#include <teeother/tools/utilites.h>
+#include <game/server/core/mmo_context.h>
 
-#endif //SERVER_STDAFX_H
+#endif //GAME_TEEOTHER_STDAFX_SHARED_H

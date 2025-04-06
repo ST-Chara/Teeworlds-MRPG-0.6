@@ -1,111 +1,106 @@
 /* (c) Magnus Auvinen. See licence.txt in the root of the distribution for more information. */
 /* If you are missing that file, acquire a complete release at teeworlds.com.                */
 #include "playerbot.h"
-
 #include "gamecontext.h"
 
-#include "entities/botai/character_bot_ai.h"
+#include "entities/character_bot.h"
 #include "worldmodes/dungeon.h"
 
-#include "mmocore/Components/Bots/BotManager.h"
-#include "mmocore/PathFinder.h"
+#include "core/components/Bots/BotManager.h"
+#include "core/tools/path_finder.h"
 
 MACRO_ALLOC_POOL_ID_IMPL(CPlayerBot, MAX_CLIENTS* ENGINE_MAX_WORLDS + MAX_CLIENTS)
 
-CPlayerBot::CPlayerBot(CGS* pGS, int ClientID, int BotID, int SubBotID, int SpawnPoint)
-	: CPlayer(pGS, ClientID), m_BotType(SpawnPoint), m_BotID(BotID), m_MobID(SubBotID), m_BotHealth(0), m_LastPosTick(0)
+CPlayerBot::CPlayerBot(CGS* pGS, int ClientID, int BotID, int MobID, int SpawnPoint)
+	: CPlayer(pGS, ClientID), m_BotType(SpawnPoint), m_BotID(BotID), m_MobID(MobID)
 {
-	m_EidolonCID = -1;
 	m_OldTargetPos = vec2(0, 0);
-	m_DungeonAllowedSpawn = false;
-	m_BotStartHealth = CPlayerBot::GetAttributeSize(AttributeIdentifier::HP);
+	m_AllowedSpawn = true;
 	m_Items.reserve(CItemDescription::Data().size());
-	ResetRespawnTick();
+
+	CPlayerBot::PrepareRespawnTick();
 }
 
 CPlayerBot::~CPlayerBot()
 {
-	// Set all elements in the m_aVisibleActive array of the DataBotInfo object at index m_BotID to 0
-	std::memset(DataBotInfo::ms_aDataBot[m_BotID].m_aVisibleActive, 0, MAX_PLAYERS * sizeof(bool));
-
-	// Delete the m_pCharacter object and set it to nullptr
-	delete m_pCharacter;
-	m_pCharacter = nullptr;
+	std::memset(DataBotInfo::ms_aDataBot[m_BotID].m_aActiveByQuest, 0, MAX_PLAYERS * sizeof(bool));
 }
 
-// This method is used to initialize the quest bot mob info for the player bot
-// It takes an instance of CQuestBotMobInfo as a parameter
 void CPlayerBot::InitQuestBotMobInfo(CQuestBotMobInfo elem)
 {
-	// Check if the bot type is TYPE_BOT_QUEST_MOB
 	if(m_BotType == TYPE_BOT_QUEST_MOB)
 	{
-		// Assign the passed CQuestBotMobInfo instance to the member variable m_QuestMobInfo
 		m_QuestMobInfo = elem;
-
-		// Set all elements of m_ActiveForClient m_CompleteClient array to false
 		std::memset(m_QuestMobInfo.m_ActiveForClient, 0, MAX_PLAYERS * sizeof(bool));
-		std::memset(m_QuestMobInfo.m_CompleteClient, 0, MAX_PLAYERS * sizeof(bool));
-
-		// Update the attribute size of the player bot for the attribute identifier HP
-		m_BotStartHealth = CPlayerBot::GetAttributeSize(AttributeIdentifier::HP);
 	}
+}
+
+void CPlayerBot::InitBasicStats(int StartHP, int StartMP, int MaxHP, int MaxMP)
+{
+	m_Health = StartHP;
+	m_Mana = StartMP;
+	m_MaxHealth = MaxHP;
+	m_MaxMana = MaxMP;
 }
 
 void CPlayerBot::Tick()
 {
-	m_BotActive = false;
-
-	if(m_pCharacter && !m_pCharacter->IsAlive())
-	{
-		delete m_pCharacter;
-		m_pCharacter = nullptr;
-	}
-
 	if(m_pCharacter)
 	{
-		m_BotActive = GS()->IsPlayersNearby(m_pCharacter->GetPos(), 1000.0f);
-
-		// update eidolon position
-		if(m_BotType == TYPE_BOT_EIDOLON)
+		if(m_pCharacter->IsAlive())
 		{
-			m_BotActive = m_BotActive && GetEidolonOwner();
-			if(const CPlayer* pOwner = GetEidolonOwner(); pOwner && pOwner->GetCharacter() && !m_BotActive)
+			if(m_BotType == TYPE_BOT_EIDOLON)
 			{
-				vec2 OwnerPos = pOwner->GetCharacter()->GetPos();
-				m_pCharacter->m_DoorHit = false;
-				m_pCharacter->ChangePosition(OwnerPos);
-				m_pCharacter->m_Core.m_Vel = pOwner->GetCharacter()->m_Core.m_Vel;
-				m_pCharacter->m_Core.m_Direction = pOwner->GetCharacter()->m_Core.m_Direction;
-				m_BotActive = true;
+				const auto* pOwner = GetEidolonOwner();
+				if(pOwner && pOwner->GetCharacter() && distance(pOwner->GetCharacter()->GetPos(), m_ViewPos) > 1000.f)
+				{
+					vec2 OwnerPos = pOwner->GetCharacter()->GetPos();
+					m_pCharacter->ResetDoorHit();
+					m_pCharacter->ChangePosition(OwnerPos);
+
+					m_pCharacter->m_Core.m_Vel = pOwner->GetCharacter()->m_Core.m_Vel;
+					m_pCharacter->m_Core.m_Direction = pOwner->GetCharacter()->m_Core.m_Direction;
+					m_pCharacter->m_Core.m_Input = pOwner->GetCharacter()->m_Core.m_Input;
+				}
+			}
+
+			if(IsActive())
+			{
+				m_ViewPos = m_pCharacter->GetPos();
+				HandlePathFinder();
 			}
 		}
-
-		if(m_pCharacter->IsAlive() && m_BotActive)
+		else
 		{
-			m_ViewPos = m_pCharacter->GetPos();
-			HandlePathFinder();
+			delete m_pCharacter;
+			m_pCharacter = nullptr;
 		}
 	}
-	else if(m_Spawned && m_aPlayerTick[Respawn] <= Server()->Tick())
+	else if(m_WantSpawn && m_aPlayerTick[Respawn] <= Server()->Tick())
 	{
-		m_BotActive = true;
 		TryRespawn();
 	}
+
+	// update events
+	m_Scenarios.Tick();
 }
 
 void CPlayerBot::PostTick()
 {
-	// update playerbot tick
 	HandleTuningParams();
-	HandleEffects();
+	m_Effects.PostTick();
+	m_Scenarios.PostTick();
 }
 
 CPlayer* CPlayerBot::GetEidolonOwner() const
 {
-	if(m_BotType != TYPE_BOT_EIDOLON || m_MobID < 0 || m_MobID >= MAX_PLAYERS)
+	if(m_MobID < 0 || m_MobID >= MAX_PLAYERS)
 		return nullptr;
-	return GS()->m_apPlayers[m_MobID];
+
+	if(m_BotType != TYPE_BOT_EIDOLON)
+		return nullptr;
+
+	return GS()->GetPlayer(m_MobID);
 }
 
 CPlayerItem* CPlayerBot::GetItem(ItemIdentifier ID)
@@ -113,250 +108,257 @@ CPlayerItem* CPlayerBot::GetItem(ItemIdentifier ID)
 	dbg_assert(CItemDescription::Data().find(ID) != CItemDescription::Data().end(), "invalid referring to the CPlayerItem (from playerbot.h)");
 
 	auto it = m_Items.find(ID);
+
 	if(it == m_Items.end())
 	{
 		if(DataBotInfo::ms_aDataBot[m_BotID].m_EquippedModules.hasSet(std::to_string(ID)))
+		{
 			it = m_Items.emplace(ID, std::make_unique<CPlayerItem>(ID, m_ClientID, 1, 0, 100, 1)).first;
+		}
 		else
+		{
 			it = m_Items.emplace(ID, std::make_unique<CPlayerItem>(ID, m_ClientID, 0, 0, 0, 0)).first;
+		}
 	}
 
 	return it->second.get();
 }
 
-void CPlayerBot::HandleEffects()
+bool CPlayerBot::IsActive() const
 {
-	if(Server()->Tick() % Server()->TickSpeed() != 0 || m_aEffects.empty())
-		return;
-
-	for(auto pEffect = m_aEffects.begin(); pEffect != m_aEffects.end();)
-	{
-		pEffect->second--;
-		if(pEffect->second <= 0)
-		{
-			pEffect = m_aEffects.erase(pEffect);
-			continue;
-		}
-		++pEffect;
-	}
+	return GS()->m_World.IsBotActive(m_ClientID);
 }
 
-void CPlayerBot::ResetRespawnTick()
+bool CPlayerBot::IsConversational() const
 {
-	// If the bot type is TYPE_BOT_MOB
+	const auto* pChar = dynamic_cast<CCharacterBotAI*>(m_pCharacter);
+	return IsActive() && pChar && pChar->AI()->IsConversational();
+}
+
+void CPlayerBot::PrepareRespawnTick()
+{
 	if(m_BotType == TYPE_BOT_MOB)
 	{
-		// Set the respawn tick for the bot using the MobBotInfo's respawn tick value
+		m_DisabledBotDamage = false;
 		m_aPlayerTick[Respawn] = Server()->Tick() + Server()->TickSpeed() * MobBotInfo::ms_aMobBot[m_MobID].m_RespawnTick;
 	}
-	// If the bot type is TYPE_BOT_NPC and the NPC bot's function is FUNCTION_NPC_GUARDIAN
+	else if(m_BotType == TYPE_BOT_QUEST_MOB)
+	{
+		m_DisabledBotDamage = false;
+		m_aPlayerTick[Respawn] = Server()->Tick() + Server()->TickSpeed();
+	}
 	else if(m_BotType == TYPE_BOT_NPC && NpcBotInfo::ms_aNpcBot[m_MobID].m_Function == FUNCTION_NPC_GUARDIAN)
 	{
-		// Set the respawn tick for the bot as the current server tick multiplied by 30
+		m_DisabledBotDamage = false;
 		m_aPlayerTick[Respawn] = Server()->Tick() + Server()->TickSpeed() * 30;
 	}
-	// If the bot type is TYPE_BOT_QUEST, TYPE_BOT_NPC, or TYPE_BOT_EIDOLON
-	else if(m_BotType == TYPE_BOT_QUEST || m_BotType == TYPE_BOT_NPC || m_BotType == TYPE_BOT_EIDOLON)
+	else if(m_BotType == TYPE_BOT_EIDOLON)
 	{
-		// Set the respawn tick for the bot as the current server tick
+		m_DisabledBotDamage = false;
 		m_aPlayerTick[Respawn] = Server()->Tick();
 	}
-	// For any other bot type
+	else if(m_BotType == TYPE_BOT_QUEST || m_BotType == TYPE_BOT_NPC)
+	{
+		m_DisabledBotDamage = true;
+		m_aPlayerTick[Respawn] = Server()->Tick();
+	}
 	else
 	{
-		// Set the respawn tick for the bot as the current server tick plus 3 server ticks
+		m_DisabledBotDamage = true;
 		m_aPlayerTick[Respawn] = Server()->Tick() + Server()->TickSpeed() * 3;
 	}
+
+	// Set the want spawn variable to true
+	m_WantSpawn = true;
 }
 
-int CPlayerBot::GetAttributeSize(AttributeIdentifier ID)
+int CPlayerBot::GetTotalAttributeValue(AttributeIdentifier ID) const
 {
-	if(m_BotType == TYPE_BOT_MOB || m_BotType == TYPE_BOT_EIDOLON || m_BotType == TYPE_BOT_QUEST_MOB ||
-		(m_BotType == TYPE_BOT_NPC && NpcBotInfo::ms_aNpcBot[m_MobID].m_Function == FUNCTION_NPC_GUARDIAN))
+	auto CalculateAttribute = [ID, this](int Power, bool Boss) -> int
 	{
-		auto CalculateAttribute = [ID, this](int Power, int Spread, bool Boss) -> int
+		// get stats from the bot's equipment
+		int AttributeValue = Power;
+		for(unsigned i = 0; i < (unsigned)ItemType::NUM_EQUIPPED; i++)
 		{
-			// get stats from the bot's equipment
-			int Size = Power;
-			for(unsigned i = 0; i < NUM_EQUIPPED; i++)
+			if(const auto ItemID = GetEquippedItemID((ItemType)i))
 			{
-				const int ItemID = GetEquippedItemID((ItemFunctional)i);
-				if(ItemID > 0)
-					Size += GS()->GetItemInfo(ItemID)->GetInfoEnchantStats(ID);
-			}
-
-			// sync power mobs
-			float Percent = 100.0f;
-			CAttributeDescription* pAttribute = GS()->GetAttributeInfo(ID);
-			if(ID == AttributeIdentifier::SpreadShotgun || ID == AttributeIdentifier::SpreadGrenade || ID == AttributeIdentifier::SpreadRifle)
-				Size = Spread;
-			else if(pAttribute->IsType(AttributeType::Healer))
-				Percent = 15.0f;
-			else if(pAttribute->IsType(AttributeType::Hardtype))
-				Percent = 5.0f;
-
-			if(Boss && ID != AttributeIdentifier::HP)
-				Percent /= 10.0f;
-
-			const int SyncPercentSize = maximum(1, translate_to_percent_rest(Size, Percent));
-			return SyncPercentSize;
-		};
-
-		// Initialize Size variable to 0
-		int Size = 0;
-
-		// Check if bot type is TYPE_BOT_EIDOLON
-		if(m_BotType == TYPE_BOT_EIDOLON)
-		{
-			// Check if game is in Dungeon mode
-			if(GS()->IsDungeon())
-			{
-				// Calculate Size based on sync factor
-				// Translate the sync factor to percent and then calculate the attribute
-				Size = CalculateAttribute(translate_to_percent_rest(maximum(1, dynamic_cast<CGameControllerDungeon*>(GS()->m_pController)->GetSyncFactor()), 5), 1, false);
-			}
-			else
-			{
-				// Calculate Size based on Eidolon item ID
-				Size = CalculateAttribute(m_EidolonItemID, 1, false);
+				AttributeValue += GS()->GetItemInfo(ItemID.value())->GetInfoEnchantStats(ID);
 			}
 		}
-		// Check if bot type is TYPE_BOT_MOB
-		else if(m_BotType == TYPE_BOT_MOB)
+
+		// sync power mobs
+		float Percent = 100.0f;
+		const auto* pAttribute = GS()->GetAttributeInfo(ID);
+
+		if(pAttribute->IsGroup(AttributeGroup::DamageType))
 		{
-			// Calculate Size based on Mob bot info
-			Size = CalculateAttribute(MobBotInfo::ms_aMobBot[m_MobID].m_Power, MobBotInfo::ms_aMobBot[m_MobID].m_Spread, MobBotInfo::ms_aMobBot[m_MobID].m_Boss);
+			Percent = 5.0f;
 		}
-		// Check if bot type is TYPE_BOT_QUEST_MOB
-		else if(m_BotType == TYPE_BOT_QUEST_MOB)
+		else if(pAttribute->IsGroup(AttributeGroup::Dps))
 		{
-			// Calculate Size based on Quest Mob info
-			Size = CalculateAttribute(m_QuestMobInfo.m_AttributePower, m_QuestMobInfo.m_AttributeSpread, true);
+			Percent = 15.0f;
 		}
-		// Check if bot type is TYPE_BOT_NPC
-		else if(m_BotType == TYPE_BOT_NPC)
+		else if(pAttribute->IsGroup(AttributeGroup::Healer))
 		{
-			// Calculate Size based on Npc info
-			Size = CalculateAttribute(2000, 0, true);
+			Percent = 20.0f;
 		}
-		return Size;
+
+		// downcast for unhardness boss
+		if(Boss && ID != AttributeIdentifier::HP)
+		{
+			Percent /= 10.0f;
+		}
+
+		const int SyncPercentSize = maximum(1, translate_to_percent_rest(AttributeValue, Percent));
+		return SyncPercentSize;
+	};
+
+
+	// initiallize attributeValue by bot type
+	int AttributeValue;
+	if(m_BotType == TYPE_BOT_EIDOLON)
+	{
+		if(GS()->IsWorldType(WorldType::Dungeon))
+		{
+			const int SyncFactor = dynamic_cast<CGameControllerDungeon*>(GS()->m_pController)->GetSyncFactor();
+			AttributeValue = CalculateAttribute(translate_to_percent_rest(maximum(1, SyncFactor), 5), false);
+		}
+		else
+		{
+			const auto* pOwner = GetEidolonOwner();
+			AttributeValue = CalculateAttribute(pOwner ? pOwner->GetTotalAttributeValue(AttributeIdentifier::EidolonPWR) : 0, false);
+		}
+	}
+	else if(m_BotType == TYPE_BOT_MOB)
+	{
+		const int PowerMob = MobBotInfo::ms_aMobBot[m_MobID].m_Power;
+		const bool IsBoss = MobBotInfo::ms_aMobBot[m_MobID].m_Boss;
+
+		AttributeValue = CalculateAttribute(PowerMob, IsBoss);
+	}
+	else if(m_BotType == TYPE_BOT_QUEST_MOB)
+	{
+		const int PowerQuestMob = m_QuestMobInfo.m_AttributePower;
+
+		AttributeValue = CalculateAttribute(PowerQuestMob, true);
+	}
+	else if(m_BotType == TYPE_BOT_NPC)
+	{
+		AttributeValue = CalculateAttribute(10, true);
+	}
+	else
+	{
+		AttributeValue = 10;
 	}
 
-	return 10;
-}
-
-void CPlayerBot::GiveEffect(const char* Potion, int Sec, float Chance)
-{
-	if(!m_pCharacter || !m_pCharacter->IsAlive())
-		return;
-
-	const float RandomChance = random_float(100.0f);
-	if(RandomChance < Chance)
-		m_aEffects[Potion] = Sec;
-}
-
-bool CPlayerBot::IsActiveEffect(const char* Potion) const
-{
-	return m_aEffects.find(Potion) != m_aEffects.end();
-}
-
-void CPlayerBot::ClearEffects()
-{
-	m_aEffects.clear();
+	return AttributeValue;
 }
 
 void CPlayerBot::TryRespawn()
 {
-	// select spawn point
-	vec2 SpawnPos;
+	if(!m_AllowedSpawn)
+		return;
+
+	std::optional<vec2> FinalSpawnPos = std::nullopt;
+
 	if(m_BotType == TYPE_BOT_MOB)
 	{
-		// close spawn mobs on non allowed spawn dungeon
-		if(GS()->IsDungeon() && !m_DungeonAllowedSpawn)
-			return;
+		vec2 SpawnPos;
+		const auto RespawnPosition = MobBotInfo::ms_aMobBot[m_MobID].m_Position;
+		const auto Radius = MobBotInfo::ms_aMobBot[m_MobID].m_Radius;
 
-		const vec2 MobRespawnPosition = MobBotInfo::ms_aMobBot[m_MobID].m_Position;
-		if(!GS()->m_pController->CanSpawn(m_BotType, &SpawnPos, std::make_pair(MobRespawnPosition, 800.f)))
-			return;
-
-		// reset spawn mobs on non allowed spawn dungeon
-		if(GS()->IsDungeon() && m_DungeonAllowedSpawn)
-			m_DungeonAllowedSpawn = false;
+		if(GS()->m_pController->CanSpawn(m_BotType, &SpawnPos, std::make_pair(RespawnPosition, Radius)))
+			FinalSpawnPos = SpawnPos;
 	}
 	else if(m_BotType == TYPE_BOT_NPC)
 	{
-		SpawnPos = NpcBotInfo::ms_aNpcBot[m_MobID].m_Position;
+		FinalSpawnPos = NpcBotInfo::ms_aNpcBot[m_MobID].m_Position;
 	}
 	else if(m_BotType == TYPE_BOT_QUEST)
 	{
-		SpawnPos = QuestBotInfo::ms_aQuestBot[m_MobID].m_Position;
+		FinalSpawnPos = QuestBotInfo::ms_aQuestBot[m_MobID].m_Position;
 	}
 	else if(m_BotType == TYPE_BOT_EIDOLON)
 	{
-		CPlayer* pOwner = GetEidolonOwner();
+		auto* pOwner = GetEidolonOwner();
 		if(!pOwner || !pOwner->GetCharacter())
 			return;
 
-		SpawnPos = pOwner->GetCharacter()->GetPos();
+		auto* pOwnerItem = pOwner->GetItem(pOwner->GetEquippedItemID(ItemType::EquipEidolon).value());
+		if(pOwnerItem->GetDurability() <= 0)
+			return;
+
+		FinalSpawnPos = pOwner->GetCharacter()->GetPos();
 	}
 	else if(m_BotType == TYPE_BOT_QUEST_MOB)
 	{
-		SpawnPos = GetQuestBotMobInfo().m_Position;
+		FinalSpawnPos = GetQuestBotMobInfo().m_Position;
 	}
 
 	// create character
-	const int AllocMemoryCell = m_ClientID + GS()->GetWorldID() * MAX_CLIENTS;
-	m_pCharacter = new(AllocMemoryCell) CCharacterBotAI(&GS()->m_World);
-	m_pCharacter->Spawn(this, SpawnPos);
-	GS()->CreatePlayerSpawn(SpawnPos, GetMaskVisibleForClients());
+	if(FinalSpawnPos.has_value())
+	{
+		const int AllocMemoryCell = m_ClientID + GS()->GetWorldID() * MAX_CLIENTS;
+		m_pCharacter = new(AllocMemoryCell) CCharacterBotAI(&GS()->m_World);
+		m_pCharacter->Spawn(this, *FinalSpawnPos);
+		GS()->CreatePlayerSpawn(*FinalSpawnPos, GetMaskVisibleForClients());
+	}
 }
 
 int64_t CPlayerBot::GetMaskVisibleForClients() const
 {
-	int64_t Mask = CmaskOne(m_ClientID);
+	int64_t Mask = 0;
 	for(int i = 0; i < MAX_PLAYERS; i++)
 	{
-		if(IsVisibleForClient(i))
+		if(IsActiveForClient(i))
 			Mask |= CmaskOne(i);
 	}
+
 	return Mask;
 }
 
-/*
-	0 - empty
-	1 - is active draw only bot
-	2 - is active draw bot and entities
-*/
-int CPlayerBot::IsVisibleForClient(int ClientID) const
+ESnappingPriority CPlayerBot::IsActiveForClient(int ClientID) const
 {
-	CPlayer* pSnappingPlayer = GS()->m_apPlayers[ClientID];
-	if(ClientID < 0 || ClientID >= MAX_PLAYERS || !pSnappingPlayer || !m_BotActive)
-		return 0;
+	CPlayer* pSnappingPlayer = GS()->GetPlayer(ClientID);
+	if(ClientID < 0 || ClientID >= MAX_PLAYERS || !pSnappingPlayer)
+		return SNAPPING_PRIORITY_NONE;
 
 	if(m_BotType == TYPE_BOT_QUEST)
 	{
-		const int QuestID = QuestBotInfo::ms_aQuestBot[m_MobID].m_QuestID;
-		if(pSnappingPlayer->GetQuest(QuestID)->GetState() != QuestState::ACCEPT)
-			return 0;
+		// is quest not accept
+		const auto QuestID = QuestBotInfo::ms_aQuestBot[m_MobID].m_QuestID;
+		if(pSnappingPlayer->GetQuest(QuestID)->GetState() != QuestState::Accepted)
+			return SNAPPING_PRIORITY_NONE;
 
-		if((QuestBotInfo::ms_aQuestBot[m_MobID].m_Step != pSnappingPlayer->GetQuest(QuestID)->GetCurrentStepPos()) || pSnappingPlayer->GetQuest(QuestID)->GetStepByMob(GetBotMobID())->m_StepComplete)
-			return 0;
+		// is step pos not equal current step pos
+		if((QuestBotInfo::ms_aQuestBot[m_MobID].m_StepPos != pSnappingPlayer->GetQuest(QuestID)->GetStepPos()))
+			return SNAPPING_PRIORITY_NONE;
 
-		// [first] quest bot active for player
-		DataBotInfo::ms_aDataBot[m_BotID].m_aVisibleActive[ClientID] = true;
+		// is step pos completed
+		if(pSnappingPlayer->GetQuest(QuestID)->GetStepByMob(GetBotMobID())->m_StepComplete)
+			return SNAPPING_PRIORITY_NONE;
 	}
 
 	if(m_BotType == TYPE_BOT_NPC)
 	{
-		// [second] skip snapping for npc already snap on quest state
-		if(DataBotInfo::ms_aDataBot[m_BotID].m_aVisibleActive[ClientID])
-			return 0;
+		const auto FunctionNPC = NpcBotInfo::ms_aNpcBot[m_MobID].m_Function;
 
-		if(!IsActiveQuests(ClientID))
-			return 1;
+		// always show guardian and nurse
+		if(FunctionNPC == FUNCTION_NPC_GUARDIAN || FunctionNPC == FUNCTION_NPC_NURSE)
+			return SNAPPING_PRIORITY_HIGH;
+
+		// does not show npc what active by quest
+		const auto ActiveByQuest = DataBotInfo::ms_aDataBot[m_BotID].m_aActiveByQuest[ClientID];
+		if(ActiveByQuest)
+			return SNAPPING_PRIORITY_NONE;
+
+		// is active or finished quest show only character
+		const int GivesQuest = GS()->Core()->BotManager()->GetQuestNPC(m_MobID);
+		if(FunctionNPC == FUNCTION_NPC_GIVE_QUEST && pSnappingPlayer->GetQuest(GivesQuest)->GetState() != QuestState::NoAccepted)
+			return SNAPPING_PRIORITY_LOWER;
 	}
 
-	return 2;
+	return SNAPPING_PRIORITY_HIGH;
 }
 
 void CPlayerBot::HandleTuningParams()
@@ -369,28 +371,36 @@ void CPlayerBot::HandleTuningParams()
 
 void CPlayerBot::Snap(int SnappingClient)
 {
+	// Get the client ID
 	int ID = m_ClientID;
-	if(!Server()->Translate(ID, SnappingClient) || !IsVisibleForClient(SnappingClient))
+
+	// Translate the client ID to the corresponding snapping client
+	if(!Server()->Translate(ID, SnappingClient))
+		return;
+
+	// Check if the game is active or if it is active for the snapping client
+	if(!IsActive() || !IsActiveForClient(SnappingClient))
 		return;
 
 	CNetObj_ClientInfo* pClientInfo = static_cast<CNetObj_ClientInfo*>(Server()->SnapNewItem(NETOBJTYPE_CLIENTINFO, ID, sizeof(CNetObj_ClientInfo)));
 	if(!pClientInfo)
 		return;
 
+	char aNameBuf[MAX_NAME_LENGTH];
+	GetFormatedName(aNameBuf, sizeof(aNameBuf));
+	StrToInts(&pClientInfo->m_Name0, 4, aNameBuf);
 	if(m_BotType == TYPE_BOT_MOB || m_BotType == TYPE_BOT_QUEST_MOB || (m_BotType == TYPE_BOT_NPC && NpcBotInfo::ms_aNpcBot[m_MobID].m_Function == FUNCTION_NPC_GUARDIAN))
 	{
-		const int PercentHP = translate_to_percent(GetStartHealth(), GetHealth());
+		const float Progress = translate_to_percent((float)GetMaxHealth(), (float)GetHealth());
 
-		char aNameBuf[MAX_NAME_LENGTH];
-		str_format(aNameBuf, sizeof(aNameBuf), "%s:%d%%", DataBotInfo::ms_aDataBot[m_BotID].m_aNameBot, clamp(PercentHP, 1, 100));
-		StrToInts(&pClientInfo->m_Name0, 4, aNameBuf);
+		std::string ProgressBar = mystd::string::progressBar(100, (int)Progress, 33, "\u25B0", "\u25B1");
+		StrToInts(&pClientInfo->m_Clan0, 3, ProgressBar.c_str());
 	}
 	else
 	{
-		StrToInts(&pClientInfo->m_Name0, 4, DataBotInfo::ms_aDataBot[m_BotID].m_aNameBot);
+		StrToInts(&pClientInfo->m_Clan0, 3, GetStatus());
 	}
 
-	StrToInts(&pClientInfo->m_Clan0, 3, GetStatus());
 	pClientInfo->m_Country = 0;
 	{
 		StrToInts(&pClientInfo->m_Skin0, 6, GetTeeInfo().m_aSkinName);
@@ -407,7 +417,7 @@ void CPlayerBot::Snap(int SnappingClient)
 	pPlayerInfo->m_Latency = 0;
 	pPlayerInfo->m_Score = 0;
 	pPlayerInfo->m_Local = LocalClient;
-	pPlayerInfo->m_ClientID = ID;
+	pPlayerInfo->m_ClientId = ID;
 	pPlayerInfo->m_Team = TEAM_BLUE;
 }
 
@@ -418,72 +428,74 @@ void CPlayerBot::FakeSnap()
 
 Mood CPlayerBot::GetMoodState() const
 {
-	CCharacterBotAI* pChr = (CCharacterBotAI*)m_pCharacter;
+	CCharacterBotAI* pChar = (CCharacterBotAI*)m_pCharacter;
+	if(!pChar)
+		return Mood::Normal;
 
-	if((GetBotType() == TYPE_BOT_MOB || GetBotType() == TYPE_BOT_QUEST_MOB) && pChr && !pChr->AI()->GetTarget()->IsEmpty())
-		return Mood::ANGRY;
+	if(GetBotType() == TYPE_BOT_MOB && !pChar->AI()->GetTarget()->IsEmpty())
+		return Mood::Angry;
+
+	if(GetBotType() == TYPE_BOT_QUEST_MOB && !pChar->AI()->GetTarget()->IsEmpty())
+		return Mood::Angry;
+
+	if(GetBotType() == TYPE_BOT_EIDOLON)
+		return Mood::Friendly;
+
+	if(GetBotType() == TYPE_BOT_QUEST)
+		return Mood::Quest;
 
 	if(GetBotType() == TYPE_BOT_NPC)
 	{
-		if(NpcBotInfo::ms_aNpcBot[m_MobID].m_Function == FUNCTION_NPC_GUARDIAN && !pChr->AI()->GetTarget()->IsEmpty())
-			return Mood::AGRESSED;
+		bool IsGuardian = NpcBotInfo::ms_aNpcBot[m_MobID].m_Function == FUNCTION_NPC_GUARDIAN;
+		if(IsGuardian && !pChar->AI()->GetTarget()->IsEmpty())
+			return Mood::Agressed;
 
-		return Mood::FRIENDLY;
+		return Mood::Friendly;
 	}
 
-	if(GetBotType() == TYPE_BOT_EIDOLON)
-		return Mood::FRIENDLY;
-
-	if(GetBotType() == TYPE_BOT_QUEST)
-		return Mood::QUEST;
-
-	return Mood::NORMAL;
+	return Mood::Normal;
 }
 
-int CPlayerBot::GetBotLevel() const
+int CPlayerBot::GetLevel() const
 {
 	return (m_BotType == TYPE_BOT_MOB ? MobBotInfo::ms_aMobBot[m_MobID].m_Level : 1);
 }
 
-bool CPlayerBot::IsActiveQuests(int SnapClientID) const
+void CPlayerBot::GetFormatedName(char* aBuffer, int BufferSize)
 {
-	CPlayer* pSnappingPlayer = GS()->m_apPlayers[SnapClientID];
-	if(SnapClientID >= MAX_PLAYERS || SnapClientID < 0 || !pSnappingPlayer)
-		return false;
-
-	if(m_BotType == TYPE_BOT_QUEST)
-		return true;
-
-	if(m_BotType == TYPE_BOT_NPC)
+	if(m_BotType == TYPE_BOT_MOB || m_BotType == TYPE_BOT_QUEST_MOB || (m_BotType == TYPE_BOT_NPC && NpcBotInfo::ms_aNpcBot[m_MobID].m_Function == FUNCTION_NPC_GUARDIAN))
 	{
-		const int GivesQuest = GS()->Mmo()->BotsData()->GetQuestNPC(m_MobID);
-		if(NpcBotInfo::ms_aNpcBot[m_MobID].m_Function == FUNCTION_NPC_GIVE_QUEST && pSnappingPlayer->GetQuest(GivesQuest)->GetState() == QuestState::NO_ACCEPT)
-			return true;
-
-		return false;
+		const int PercentHP = translate_to_percent(GetMaxHealth(), GetHealth());
+		str_format(aBuffer, BufferSize, "%s:%d%%", DataBotInfo::ms_aDataBot[m_BotID].m_aNameBot, clamp(PercentHP, 1, 100));
 	}
-	return false;
+	else
+	{
+		str_format(aBuffer, BufferSize, "%s", DataBotInfo::ms_aDataBot[m_BotID].m_aNameBot);
+	}
 }
 
-int CPlayerBot::GetEquippedItemID(ItemFunctional EquipID, int SkipItemID) const
+std::optional<int> CPlayerBot::GetEquippedItemID(ItemType EquipID, int SkipItemID) const
 {
-	if((EquipID >= EQUIP_HAMMER && EquipID <= EQUIP_LASER) || EquipID == EQUIP_ARMOR)
-		return DataBotInfo::ms_aDataBot[m_BotID].m_aEquipSlot[EquipID];
-	return -1;
+	auto& DataBot = DataBotInfo::ms_aDataBot[m_BotID];
+	if(DataBot.m_vEquippedSlot.contains(EquipID))
+	{
+		int itemID = DataBot.m_vEquippedSlot[EquipID];
+		return (itemID > 0) ? std::make_optional(itemID) : std::nullopt;
+	}
+
+	return std::nullopt;
 }
 
 const char* CPlayerBot::GetStatus() const
 {
 	if(m_BotType == TYPE_BOT_MOB && MobBotInfo::ms_aMobBot[m_MobID].m_Boss)
 	{
-		if(GS()->IsDungeon())
-			return "Boss";
-		return "Raid";
+		return GS()->IsWorldType(WorldType::Dungeon) ? "Boss" : "Raid";
 	}
 
 	if(m_BotType == TYPE_BOT_QUEST_MOB)
 	{
-		return "Quest mob";
+		return "Questing mob";
 	}
 
 	if(m_BotType == TYPE_BOT_EIDOLON && GetEidolonOwner())
@@ -492,39 +504,30 @@ const char* CPlayerBot::GetStatus() const
 		return Server()->ClientName(OwnerID);
 	}
 
-	switch(GetMoodState())
+	const Mood State = GetMoodState();
+	if(State == Mood::Quest)
 	{
-		default:
-		case Mood::NORMAL:
-		return "\0";
-		case Mood::FRIENDLY:
-		return "Friendly";
-		case Mood::QUEST:
-		{
-			const int QuestID = QuestBotInfo::ms_aQuestBot[m_MobID].m_QuestID;
-			return GS()->GetQuestInfo(QuestID)->GetName();
-		}
-		case Mood::ANGRY:
-		return "Angry";
-		case Mood::AGRESSED:
-		return "Aggressive";
+		const int QuestID = QuestBotInfo::ms_aQuestBot[m_MobID].m_QuestID;
+		return GS()->GetQuestInfo(QuestID)->GetName();
+	}
+
+	return GetMoodName(State);
+}
+
+int CPlayerBot::GetCurrentWorldID() const
+{
+	switch(m_BotType)
+	{
+		case TYPE_BOT_MOB: return MobBotInfo::ms_aMobBot[m_MobID].m_WorldID;
+		case TYPE_BOT_QUEST_MOB: return m_QuestMobInfo.m_WorldID;
+		case TYPE_BOT_NPC: return NpcBotInfo::ms_aNpcBot[m_MobID].m_WorldID;
+		case TYPE_BOT_EIDOLON: return Server()->GetClientWorldID(m_MobID);
+		case TYPE_BOT_QUEST: return QuestBotInfo::ms_aQuestBot[m_MobID].m_WorldID;
+		default: return -1;
 	}
 }
 
-int CPlayerBot::GetPlayerWorldID() const
-{
-	if(m_BotType == TYPE_BOT_MOB)
-		return MobBotInfo::ms_aMobBot[m_MobID].m_WorldID;
-	if(m_BotType == TYPE_BOT_NPC)
-		return NpcBotInfo::ms_aNpcBot[m_MobID].m_WorldID;
-	if(m_BotType == TYPE_BOT_EIDOLON)
-		return Server()->GetClientWorldID(m_MobID);
-	if(m_BotType == TYPE_BOT_QUEST_MOB)
-		return m_QuestMobInfo.m_WorldID;
-	return QuestBotInfo::ms_aQuestBot[m_MobID].m_WorldID;
-}
-
-CTeeInfo& CPlayerBot::GetTeeInfo() const
+const CTeeInfo& CPlayerBot::GetTeeInfo() const
 {
 	dbg_assert(DataBotInfo::IsDataBotValid(m_BotID), "Assert getter TeeInfo from data bot");
 	return DataBotInfo::ms_aDataBot[m_BotID].m_TeeInfos;
@@ -532,60 +535,50 @@ CTeeInfo& CPlayerBot::GetTeeInfo() const
 
 void CPlayerBot::HandlePathFinder()
 {
-	if(!m_BotActive || !m_pCharacter || !m_pCharacter->IsAlive())
+	const auto* pChar = dynamic_cast<CCharacterBotAI*>(m_pCharacter);
+	if(!IsActive() || !pChar || !pChar->IsAlive() || Server()->Tick() % 5 != 0)
 		return;
 
-	// Check if the bot type is TYPE_BOT_MOB
 	if(GetBotType() == TYPE_BOT_MOB)
 	{
-		// Check if the target position is not (0, 0) and if the current server tick modulo (3 * m_ClientID) is 0
-		if(m_TargetPos != vec2(0, 0) && (Server()->Tick() + 3 * m_ClientID) % (Server()->TickSpeed()) == 0)
+		if(m_TargetPos.has_value())
 		{
-			// Prepare the path finder data for default path finding
-			GS()->PathFinder()->SyncHandler()->Prepare<CPathFinderPrepared::TYPE::DEFAULT>(&m_PathFinderData, m_ViewPos, m_TargetPos);
+			GS()->PathFinder()->RequestPath(m_PathHandle, pChar->m_Core.m_Pos, m_TargetPos.value());
 		}
-		// If the target position is (0, 0) or the distance between the view position and the target position is less than 128.0f
-		else if(m_TargetPos == vec2(0, 0) || distance(m_ViewPos, m_TargetPos) < 128.0f)
+		else if(m_LastPosTick < Server()->Tick())
 		{
-			// Set the last position tick to the current server tick plus a random time interval
 			m_LastPosTick = Server()->Tick() + (Server()->TickSpeed() * 2 + rand() % 4);
-			// Prepare the path finder data for random path finding
-			GS()->PathFinder()->SyncHandler()->Prepare<CPathFinderPrepared::TYPE::RANDOM>(&m_PathFinderData, m_ViewPos, m_TargetPos);
+			GS()->PathFinder()->RequestRandomPath(m_PathHandle, pChar->m_Core.m_Pos, 800.f);
 		}
 	}
 
 	// Check if the bot type is TYPE_BOT_EIDOLON
 	else if(GetBotType() == TYPE_BOT_EIDOLON)
 	{
-		// Get the owner ID of the bot
 		int OwnerID = m_MobID;
-		// Check if the owner player exists and if the target position is not (0, 0) and if the current server tick modulo (Server()->TickSpeed() / 3) is 0
-		if(const CPlayer* pPlayerOwner = GS()->GetPlayer(OwnerID, true, true); pPlayerOwner && m_TargetPos != vec2(0, 0) && Server()->Tick() % (Server()->TickSpeed() / 3) == 0)
+		const auto* pPlayerOwner = GS()->GetPlayer(OwnerID, true, true);
+
+		if(pPlayerOwner && m_TargetPos.has_value())
 		{
-			// Prepare the path finder data for default path finding
-			GS()->PathFinder()->SyncHandler()->Prepare<CPathFinderPrepared::TYPE::DEFAULT>(&m_PathFinderData, m_ViewPos, m_TargetPos);
+			GS()->PathFinder()->RequestPath(m_PathHandle, pChar->m_Core.m_Pos, m_TargetPos.value());
 		}
 	}
 
 	// Check if the bot type is TYPE_BOT_QUEST_MOB
 	else if(GetBotType() == TYPE_BOT_QUEST_MOB)
 	{
-		// Check if the target position is not (0, 0) and if the current server tick modulo (Server()->TickSpeed() / 3) is 0
-		if(m_TargetPos != vec2(0, 0) && Server()->Tick() % (Server()->TickSpeed() / 3) == 0)
+		if(m_TargetPos.has_value())
 		{
-			// Prepare the path finder data for default path finding
-			GS()->PathFinder()->SyncHandler()->Prepare<CPathFinderPrepared::TYPE::DEFAULT>(&m_PathFinderData, m_ViewPos, m_TargetPos);
+			GS()->PathFinder()->RequestPath(m_PathHandle, pChar->m_Core.m_Pos, m_TargetPos.value());
 		}
 	}
 
 	// Check if the bot type is TYPE_BOT_NPC and the function is FUNCTION_NPC_GUARDIAN
 	else if(GetBotType() == TYPE_BOT_NPC && NpcBotInfo::ms_aNpcBot[m_MobID].m_Function == FUNCTION_NPC_GUARDIAN)
 	{
-		// Check if the target position is not (0, 0) and if the current server tick modulo (Server()->TickSpeed() / 3) is 0
-		if(m_TargetPos != vec2(0, 0) && Server()->Tick() % (Server()->TickSpeed() / 3) == 0)
+		if(m_TargetPos.has_value())
 		{
-			// Prepare the path finder data for default path finding
-			GS()->PathFinder()->SyncHandler()->Prepare<CPathFinderPrepared::TYPE::DEFAULT>(&m_PathFinderData, m_ViewPos, m_TargetPos);
+			GS()->PathFinder()->RequestPath(m_PathHandle, pChar->m_Core.m_Pos, m_TargetPos.value());
 		}
 	}
 }

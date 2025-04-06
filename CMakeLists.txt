@@ -31,8 +31,8 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
 endif()
 
 include(CheckCCompilerFlag)
+include(CheckCXXCompilerFlag)
 include(CheckSymbolExists)
-#include(CheckCXXCompilerFlag) #unused
 
 check_symbol_exists(__i386 "" TARGET_ARCH_X86_i386)
 if(TARGET_ARCH_X86_i386)
@@ -43,7 +43,6 @@ endif()
 
 set(AUTO_DEPENDENCIES_DEFAULT ON)
 option(SERVER_COMPILE "Build the server together with the client" ON)
-option(DISCORD_SERVER_COMPILE "Compile Sleepy-Discord in conjunction with the server" ON)
 option(DOWNLOAD_GTEST "Download and compile GTest if not found" ${AUTO_DEPENDENCIES_DEFAULT})
 option(PREFER_BUNDLED_LIBS "Prefer bundled libraries over system libraries" ${AUTO_DEPENDENCIES_DEFAULT})
 option(DEV "Don't generate stuff necessary for packaging" OFF)
@@ -63,25 +62,33 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS src/game/version.
 
 set(SERVER_EXECUTABLE mmoteeworlds_srv CACHE STRING "Name of the built server executable")
 #set(CLIENT_EXECUTABLE mmoteeworlds CACHE STRING "Name of the build client executable")
-#set(CLIENT_COMPILE ON)
 
 ########################################################################
 # Compiler flags
 ########################################################################
 
 function(add_c_compiler_flag_if_supported VARIABLE FLAG)
-  if(ARGC GREATER 2)
-    set(CHECKED_FLAG "${ARGV2}")
-  else()
-    set(CHECKED_FLAG "${FLAG}")
-  endif()
-  string(REGEX REPLACE "[^A-Za-z0-9]" "_" CONFIG_VARIABLE "FLAG_SUPPORTED${CHECKED_FLAG}")
+  set(CHECKED_FLAG "${FLAG}")
+  string(REGEX REPLACE "[^A-Za-z0-9]" "_" CONFIG_VARIABLE "FLAG_SUPPORTED_${CHECKED_FLAG}")
   check_c_compiler_flag("${CHECKED_FLAG}" ${CONFIG_VARIABLE})
   if(${CONFIG_VARIABLE})
-    if(${VARIABLE})
-      set("${VARIABLE}" "${${VARIABLE}};${FLAG}" PARENT_SCOPE)
+    if(DEFINED ${VARIABLE})
+      set(${VARIABLE} "${${VARIABLE}};${FLAG}" PARENT_SCOPE)
     else()
-      set("${VARIABLE}" "${FLAG}" PARENT_SCOPE)
+      set(${VARIABLE} "${FLAG}" PARENT_SCOPE)
+    endif()
+  endif()
+endfunction()
+
+function(add_cxx_compiler_flag_if_supported VARIABLE FLAG)
+  set(CHECKED_FLAG "${FLAG}")
+  string(REGEX REPLACE "[^A-Za-z0-9]" "_" CONFIG_VARIABLE "FLAG_SUPPORTED_${CHECKED_FLAG}")
+  check_cxx_compiler_flag("${CHECKED_FLAG}" ${CONFIG_VARIABLE})
+  if(${CONFIG_VARIABLE})
+    if(DEFINED ${VARIABLE})
+      set(${VARIABLE} "${${VARIABLE}};${FLAG}" PARENT_SCOPE)
+    else()
+      set(${VARIABLE} "${FLAG}" PARENT_SCOPE)
     endif()
   endif()
 endfunction()
@@ -94,44 +101,26 @@ if(NOT MSVC)
   # Inaccurate floating point numbers cause problems on mingw-w64-gcc when
   # compiling for x86, might cause problems elsewhere. So don't store floats
   # in registers but keep them at higher accuracy.
-
   if(TARGET_ARCH STREQUAL "x86")
     add_c_compiler_flag_if_supported(OUR_FLAGS -ffloat-store)
   endif()
 
-  #if(TARGET_OS STREQUAL "mac")
-  #  add_c_compiler_flag_if_supported(OUR_FLAGS -stdlib=libc++)
-  #  add_c_compiler_flag_if_supported(OUR_FLAGS -mmacosx-version-min=10.7)
-  #endif()
-  
-  if(CMAKE_VERSION VERSION_LESS 3.1)
-    add_cxx_compiler_flag_if_supported(OUR_FLAGS_OWN -std=gnu++17)
-  endif()
-  
-  add_c_compiler_flag_if_supported(OUR_FLAGS_OWN -Wall)
-  if(CMAKE_VERSION VERSION_GREATER 3.3 OR CMAKE_VERSION VERSION_EQUAL 3.3)
-    add_c_compiler_flag_if_supported(OUR_FLAGS_OWN
-      $<$<COMPILE_LANGUAGE:C>:-Wdeclaration-after-statement>
-      -Wdeclaration-after-statement
-    )
-  endif()
-  add_c_compiler_flag_if_supported(OUR_FLAGS_OWN -Wextra)
-  add_c_compiler_flag_if_supported(OUR_FLAGS_OWN -Wno-unused-parameter)
-  add_c_compiler_flag_if_supported(OUR_FLAGS_OWN -Wno-missing-field-initializers)
-  add_c_compiler_flag_if_supported(OUR_FLAGS_OWN -Wformat=2) # Warn about format strings.
+  add_cxx_compiler_flag_if_supported(OUR_FLAGS_OWN -Wall)
+  add_cxx_compiler_flag_if_supported(OUR_FLAGS_OWN -Wextra)
+  add_cxx_compiler_flag_if_supported(OUR_FLAGS_OWN -Wno-unused-parameter)
+  add_cxx_compiler_flag_if_supported(OUR_FLAGS_OWN -Wno-missing-field-initializers)
+  add_cxx_compiler_flag_if_supported(OUR_FLAGS_OWN -Wno-deprecated-enum-enum-conversion)
+  add_cxx_compiler_flag_if_supported(OUR_FLAGS_OWN -Wformat=2)
+  add_cxx_compiler_flag_if_supported(OUR_FLAGS_OWN -Wduplicated-cond)
+  add_cxx_compiler_flag_if_supported(OUR_FLAGS_OWN -Wduplicated-branches)
+  add_cxx_compiler_flag_if_supported(OUR_FLAGS_OWN -Wlogical-op)
+  add_cxx_compiler_flag_if_supported(OUR_FLAGS_OWN -Wrestrict)
 
-  # sry, discord sdk is broken somehow and throws this error on linux
-  if (NOT TARGET_OS STREQUAL "linux")
-    add_c_compiler_flag_if_supported(OUR_FLAGS_DEP -Wno-implicit-function-declaration)
+  # broken somehow and throws this error on linux
+  if(NOT TARGET_OS STREQUAL "linux")
+    add_cxx_compiler_flag_if_supported(OUR_FLAGS_DEP -Wno-implicit-function-declaration)
   endif()
 
-  add_c_compiler_flag_if_supported(OUR_FLAGS_OWN -Wduplicated-cond)
-  add_c_compiler_flag_if_supported(OUR_FLAGS_OWN -Wduplicated-branches)
-  add_c_compiler_flag_if_supported(OUR_FLAGS_OWN -Wlogical-op)
-  add_c_compiler_flag_if_supported(OUR_FLAGS_OWN -Wrestrict)
-endif()
-
-if(NOT MSVC)
   check_c_compiler_flag("-O2;-Wp,-Werror;-D_FORTIFY_SOURCE=2" DEFINE_FORTIFY_SOURCE) # Some distributions define _FORTIFY_SOURCE by themselves.
 endif()
 
@@ -216,7 +205,6 @@ if(NOT CMAKE_CROSSCOMPILING)
 endif()
 
 ## own packages
-set(Boost_INCLUDES_DIRS)
 find_package(Python3)
 find_package(Threads)
 find_package(ZLIB)
@@ -230,20 +218,14 @@ find_package(OpenSSL)
 find_package(MySQL)
 #find_package(DiscordGameSDK)
 #find_package(GLEW)
+find_package(SQLite3)
 
-# TODO: change
-if(TARGET_OS AND TARGET_OS STREQUAL "linux")
-  find_package(Boost 1.36.0)
-  if(NOT(Boost_FOUND))
-    message(FATAL_ERROR, "Required install Boost.")
-  endif()
-#elseif(TARGET_OS AND TARGET_OS STREQUAL "mac")
-#  set(SERVER_COMPILE OFF)
+## boost
+if(POLICY CMP0167)
+  cmake_policy(SET CMP0167 OLD)
 endif()
-
-if(NOT(Boost_INCLUDES_DIRS))
-  set(Boost_INCLUDE_DIRS "libraries/boost/include")
-endif()
+set(BOOST_INCLUDEDIR "libraries/boost/include") # hint
+find_package(Boost 1.69 REQUIRED) # smart_ptr (header-only)
 
 # another packages
 find_package(Git)
@@ -298,8 +280,8 @@ endif()
 
 if(SERVER_COMPILE)
   show_dependency_status("MySQL" MYSQL TRUE)
-  #show_dependency_status("ICU" ICU TRUE)
   show_dependency_status("OpenSSL" OPENSSL FALSE)
+  show_dependency_status("SQLite3" SQLite3 TRUE)
 endif()
 #if(CLIENT_COMPILE)
 #  show_dependency_status("Freetype" FREETYPE TRUE)
@@ -311,11 +293,6 @@ endif()
 #  show_dependency_status("Glew" GLEW TRUE)
 #endif()
 show_dependency_status("Curl" CURL TRUE)
-
-if(NOT OPENSSL_FOUND)
-  message(WARNING "Server discord support is disabled, as well as some crypto functions in favor of md5")
-  set(DISCORD_SERVER_COMPILE OFF)
-endif()
 
 if(NOT GTEST_FOUND)
   if(DOWNLOAD_GTEST)
@@ -358,6 +335,12 @@ if(TARGET_OS STREQUAL "windows")
 #    set(PLATFORM_LIBS)
 #  endif()
 endif()
+
+########################################################################
+# EXTERNAL
+########################################################################
+
+include(${CMAKE_SOURCE_DIR}/cmake/ExternalMaxMindDB.cmake)
 
 ########################################################################
 # DOWNLOAD GTEST
@@ -409,9 +392,6 @@ if(NOT(GTEST_FOUND) AND DOWNLOAD_GTEST)
 
       set(GTEST_LIBRARIES gtest)
       set(GTEST_INCLUDE_DIRS)
-      if(CMAKE_VERSION VERSION_LESS 2.8.11)
-        set(GTEST_INCLUDE_DIRS "${gtest_SOURCE_DIR}/include")
-      endif()
     endif()
   endif()
 endif()
@@ -422,25 +402,27 @@ endif()
 
 set_src(DEP_JSON_SRC GLOB src/engine/external/json-parser json.c json.h)
 set_src(DEP_MD5_SRC GLOB src/engine/external/md5 md5.c md5.h)
-set_src(DEP_PUGIXML_SRC GLOB src/engine/external/xml pugiconfig.hpp pugixml.cpp pugixml.hpp)
 
 add_library(json EXCLUDE_FROM_ALL OBJECT ${DEP_JSON_SRC})
 add_library(md5 EXCLUDE_FROM_ALL OBJECT ${DEP_MD5_SRC})
-add_library(pugixml EXCLUDE_FROM_ALL OBJECT ${DEP_PUGIXML_SRC})
 
 set(DEP_JSON $<TARGET_OBJECTS:json>)
 set(DEP_MD5 $<TARGET_OBJECTS:md5>)
-set(DEP_PUGIXML $<TARGET_OBJECTS:pugixml>)
 
-list(APPEND TARGETS_DEP json md5 pugixml)
+list(APPEND TARGETS_DEP json md5)
 
 ########################################################################
 # COPY DATA AND DLLS
 ########################################################################
 
-file(COPY maps DESTINATION .)
-file(COPY server_data DESTINATION .)
-file(COPY server_lang DESTINATION .)
+file(GLOB COPY_DATA_FILES
+  "maps"
+  "server_data"
+  "server_lang"
+  "*.cfg"
+)
+file(COPY ${COPY_DATA_FILES} DESTINATION .)
+
 #file(COPY data DESTINATION .)
 #set(COPY_FILES_CLIENT
 #  ${CURL_COPY_FILES}
@@ -456,9 +438,10 @@ set(COPY_FILES_SERVER
   ${CURL_COPY_FILES}
   ${MYSQL_COPY_FILES}
   ${OPENSSL_COPY_FILES}
+  ${SQLite3_COPY_FILES}
 )
 
-file(COPY #${COPY_FILES_CLIENT} 
+file(COPY #${COPY_FILES_CLIENT}
   ${COPY_FILES_SERVER} DESTINATION .)
 
 ########################################################################
@@ -524,7 +507,6 @@ generate_source("src/generated/protocol.cpp" "network_source")
 generate_source("src/generated/protocol.h" "network_header")
 generate_source("src/generated/server_data.cpp" "server_content_source")
 generate_source("src/generated/server_data.h" "server_content_header")
-
 
 ########################################################################
 # SHARED
@@ -640,11 +622,11 @@ set(GAME_GENERATED_SHARED
 )
 
 # Libraries & Deps
-set(DEPS ${DEP_JSON} ${DEP_MD5} ${ZLIB_DEP} ${DEP_PUGIXML})
+set(DEPS ${DEP_JSON} ${DEP_MD5} ${ZLIB_DEP})
 set(LIBS ${CMAKE_THREAD_LIBS_INIT} ${ZLIB_LIBRARIES} ${CURL_LIBRARIES} ${OPENSSL_CRYPTO_LIBRARY} ${PLATFORM_LIBS})
 
 # Targets
-add_library(engine-shared EXCLUDE_FROM_ALL OBJECT ${ENGINE_INTERFACE} ${ENGINE_SHARED} ${ENGINE_GENERATED_SHARED} ${BASE} )
+add_library(engine-shared EXCLUDE_FROM_ALL OBJECT ${ENGINE_INTERFACE} ${ENGINE_SHARED} ${ENGINE_GENERATED_SHARED} ${BASE})
 add_library(game-shared EXCLUDE_FROM_ALL OBJECT ${GAME_SHARED} ${GAME_GENERATED_SHARED})
 
 target_precompile_headers(engine-shared PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:${CMAKE_CURRENT_SOURCE_DIR}/src/teeother/stdafx_shared.h>")
@@ -731,74 +713,6 @@ list(APPEND TARGETS_OWN engine-shared game-shared)
 #  list(APPEND TARGETS_LINK ${TARGET_CLIENT})
 #endif()
 
-
-########################################################################
-# SLEEPY-DISCORD
-########################################################################
-
-if(SERVER_COMPILE AND DISCORD_SERVER_COMPILE)
-  # Include Cpr
-  set(CPR_LIBRARIES cpr CACHE INTERNAL "")
-  install(DIRECTORY ${PROJECT_SOURCE_DIR}/discord_deps/cpr-external/include/cpr DESTINATION ${PROJECT_SOURCE_DIR}/discord_deps/cpr-external/include)
-  set(CPR_INCLUDE_DIRS "${PROJECT_SOURCE_DIR}/discord_deps/cpr-external/include")
-  file(GLOB CPR_LIBRARIES_SRC "${PROJECT_SOURCE_DIR}/discord_deps/cpr-external/cpr/*.cpp" "${CPR_INCLUDE_DIRS}/*.h")
-  add_library(${CPR_LIBRARIES} EXCLUDE_FROM_ALL OBJECT ${CPR_LIBRARIES_SRC})
-  if((MINGW OR TARGET_OS STREQUAL "linux") AND PREFER_BUNDLED_LIBS)
-    target_link_libraries(${CPR_LIBRARIES} -lcurl) # wtf
-  endif()
-  target_link_libraries(${CPR_LIBRARIES} ${CURL_LIBRARIES})
-  target_include_directories(${CPR_LIBRARIES} PUBLIC ${CPR_INCLUDE_DIRS} ${CURL_INCLUDE_DIRS} ${OPENSSL_INCLUDE_DIRS})
-  list(APPEND TARGETS_DEP ${CPR_LIBRARIES})
-
-  # Include Sleepy-Discord
-  file(GLOB SLEEPY_DISCORD_LIBRARIES_SRC "${PROJECT_SOURCE_DIR}/discord_deps/sleepy-discord/sleepy_discord/*.cpp")
-  add_library(sleepy-discord EXCLUDE_FROM_ALL OBJECT ${SLEEPY_DISCORD_LIBRARIES_SRC})
-  target_include_directories(sleepy-discord
-    PUBLIC ${PROJECT_SOURCE_DIR}/discord_deps/sleepy-discord/include
-	PRIVATE ${PROJECT_SOURCE_DIR}/discord_deps/sleepy-discord/include/sleepy_discord)
-
-  # Including Cpr to Sleepy-Discord
-  set(SLEEPY_DISCORD_LIBRARIES)
-  target_include_directories(sleepy-discord PUBLIC ${CPR_INCLUDE_DIRS})
-  list(APPEND SLEEPY_DISCORD_LIBRARIES ${CPR_LIBRARIES})
-  target_compile_definitions(sleepy-discord PUBLIC EXISTENT_CPR)
-
-  # Including Asio to Sleepy-Discord
-  target_include_directories(sleepy-discord PUBLIC "${PROJECT_SOURCE_DIR}/discord_deps/asio/asio/include")
-  target_compile_definitions(sleepy-discord PUBLIC EXISTENT_ASIO)
-
-  # Including Websocketpp to Sleepy-Discord
-  target_include_directories(sleepy-discord PUBLIC "${PROJECT_SOURCE_DIR}/discord_deps/websocketpp")
-  target_compile_definitions(sleepy-discord PUBLIC EXISTENT_WEBSOCKETPP)
-
-  # Including OpenSSL to Sleepy-Discord
-  if (WIN32)
-	list(APPEND SLEEPY_DISCORD_LIBRARIES ${OPENSSL_LIBRARY})
-  elseif (UNIX)
-	list(APPEND SLEEPY_DISCORD_LIBRARIES ${OPENSSL_LIBRARY} "Threads::Threads")
-  endif()
-
-  #Todo add support for it
-  target_compile_definitions(sleepy-discord PUBLIC NONEEXISTENT_ZLIB_NG)
-  target_compile_definitions(sleepy-discord PUBLIC NONEXISTENT_UWEBSOCKETS)
-  target_compile_definitions(sleepy-discord PUBLIC NONEXISTENT_OPUS)
-  target_compile_definitions(sleepy-discord PUBLIC NONEXISTENT_SODIUM)
-  target_link_libraries(sleepy-discord ${SLEEPY_DISCORD_LIBRARIES})
-  list(APPEND TARGETS_DEP sleepy-discord)
-
-  # Disable warning sleepy-discord
-  if(MINGW OR TARGET_OS STREQUAL "linux")
-    target_compile_options(sleepy-discord PUBLIC -Wno-duplicated-branches -Wno-deprecated-copy)
-  endif()
-
-  #The codebase is c++11 but both clang and visual c++ have issues with c++11
-  #These issues are fixed by using preprocessor defines to replace code that
-  #cause issues with c++14 and upper    
-  set_target_properties(sleepy-discord PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
-  target_compile_features(sleepy-discord PUBLIC cxx_return_type_deduction)
-endif()
-
-
 ########################################################################
 # SERVER
 ########################################################################
@@ -806,24 +720,23 @@ endif()
 if(SERVER_COMPILE)
   # Sources
   file(GLOB_RECURSE ENGINE_SERVER "src/engine/server/*.cpp" "src/engine/server/*.h")
-  file(GLOB_RECURSE GAME_SERVER "src/game/server/*.cpp" "src/game/server/*.h")
-  file(GLOB LOCALIZED_SERVER "src/teeother/components/*.cpp" "src/teeother/components/*.h" "src/teeother/flat_hash_map/*.h" "src/teeother/system/*.h" "src/teeother/tl/*.h")
+  file(GLOB_RECURSE GAME_SERVER "src/game/server/*.cpp" "src/game/server/*.h" "src/game/server/*.hpp")
+  file(GLOB LOCALIZED_SERVER "src/teeother/components/*.cpp" "src/teeother/components/*.h" "src/teeother/tools/*.cpp"
+     "src/teeother/tools/geolite2pp/*.cpp" "src/teeother/tools/geolite2pp/*.hpp"
+     "src/teeother/tools/*.h" "src/teeother/tools/flat_hash_map/*.h")
   set(GAME_GENERATED_SERVER src/generated/server_data.cpp src/generated/server_data.h)
   set(SERVER_SRC ${ENGINE_SERVER} ${GAME_SERVER} ${GAME_GENERATED_SERVER} ${LOCALIZED_SERVER})
-  
-  # Deps
-  set(DISCORD_SERVER_LIBS)
-  if(DISCORD_SERVER_COMPILE)
-    set(DISCORD_SERVER_LIBS sleepy-discord ${CPR_LIBRARIES})
-  endif()
 
   set(SERVER_INCLUDES_DIRS
     ${Boost_INCLUDE_DIRS}
     ${MYSQL_INCLUDE_DIRS}
+    ${SQLite3_INCLUDE_DIRS}
+    ${LIBMAXMINDDB_INCLUDE_DIR}
   )
   set(SERVER_LIBRARIES
     ${MYSQL_LIBRARIES}
-    ${DISCORD_SERVER_LIBS}
+    ${SQLite3_LIBRARIES}
+    ${Boost_LIBRARIES} # empty, but will be here for the future
   )
   set(DEPS_SERVER ${DEPS})
 
@@ -841,6 +754,7 @@ if(SERVER_COMPILE)
     ${DEPS_SERVER}
     $<TARGET_OBJECTS:engine-shared>
     $<TARGET_OBJECTS:game-shared>
+    $<TARGET_OBJECTS:libmaxminddb>
   )
   target_precompile_headers(${TARGET_SERVER} PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:${CMAKE_CURRENT_SOURCE_DIR}/src/teeother/stdafx_shared.h>" "$<$<COMPILE_LANGUAGE:CXX>:${CMAKE_CURRENT_SOURCE_DIR}/src/teeother/stdafx_server.h>")
   target_include_directories(${TARGET_SERVER} PRIVATE ${SERVER_INCLUDES_DIRS})
@@ -1270,11 +1184,9 @@ foreach(target ${TARGETS_LINK})
 endforeach()
 
 foreach(target ${TARGETS_OWN})
-  if((CMAKE_VERSION VERSION_GREATER 3.1 OR CMAKE_VERSION VERSION_EQUAL 3.1))
-    set_property(TARGET ${target} PROPERTY CXX_STANDARD 17)
-    set_property(TARGET ${target} PROPERTY CXX_STANDARD_REQUIRED ON)
-    set_property(TARGET ${target} PROPERTY CXX_EXTENSIONS OFF)
-  endif()
+  set_property(TARGET ${target} PROPERTY CXX_STANDARD 20)
+  set_property(TARGET ${target} PROPERTY CXX_STANDARD_REQUIRED ON)
+  set_property(TARGET ${target} PROPERTY CXX_EXTENSIONS OFF)
 
   if(MSVC)
 	target_compile_options(${target} PRIVATE /W3)
@@ -1298,20 +1210,9 @@ foreach(target ${TARGETS_OWN})
 	target_include_directories(${target} PRIVATE ${OPENSSL_INCLUDE_DIRS})
   endif()
 
-  if(DISCORD_SERVER_COMPILE)
-    target_compile_definitions(${target} PRIVATE CONF_DISCORD)
-  endif()
-
   if(MYSQL_FOUND)
 	target_include_directories(${target} PRIVATE ${MYSQL_INCLUDE_DIRS})
   endif()
-
-  #if(ICU_FOUND)
-	#target_include_directories(${target} PRIVATE ${ICU_INCLUDE_DIRS})
-  #endif()
-  
-  set_target_properties(${target} PROPERTIES CXX_STANDARD_REQUIRED ON)
-  target_compile_features(${target} PUBLIC cxx_std_14)
 endforeach()
 
 foreach(target ${TARGETS_DEP})

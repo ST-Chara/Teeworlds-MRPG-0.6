@@ -3,17 +3,8 @@
 #ifndef ENGINE_SERVER_H
 #define ENGINE_SERVER_H
 
-#include "kernel.h"
-#include "message.h"
-
-#define DC_SERVER_INFO 13872503
-#define DC_PLAYER_INFO 1346299
-#define DC_JOIN_LEAVE 14494801
-#define DC_SERVER_CHAT 7899095
-#define DC_DISCORD_WARNING 13183530
-#define DC_DISCORD_SUCCESS 1346299
-#define DC_DISCORD_INFO 431050
-#define DC_INVISIBLE_GRAY 3553599
+#include <engine/input_events.h>
+#include <engine/shared/world_detail.h>
 
 // When recording a demo on the server, the ClientID -1 is used
 enum
@@ -29,12 +20,10 @@ protected:
 	int m_TickSpeed;
 
 public:
-	// static std::mutex m_aMutexPlayerDataSafe[MAX_CLIENTS];
-	virtual class IGameServer* GameServer(int WorldID = 0) = 0;
-	virtual class IGameServer* GameServerPlayer(int ClientID) = 0;
-
-	class CLocalization* m_pLocalization;
-	inline class CLocalization* Localization() const { return m_pLocalization; }
+	virtual class IGameServer* GameServer(int WorldID = 0) const = 0;
+	virtual class IGameServer* GameServerPlayer(int ClientID) const = 0;
+	virtual class CLocalization* Localization() const = 0;
+	virtual class IInputEvents* Input() const = 0;
 
 	struct CClientInfo
 	{
@@ -51,20 +40,19 @@ public:
 
 	virtual const char *ClientName(int ClientID) const = 0;
 	virtual const char *ClientClan(int ClientID) const = 0;
+	virtual const char* ClientContinent(int ClientID) const = 0;
+	virtual const char* ClientCountryIsoCode(int ClientID) const = 0;
 	virtual int ClientCountry(int ClientID) const = 0;
 	virtual bool ClientIngame(int ClientID) const = 0;
 	virtual int GetClientInfo(int ClientID, CClientInfo *pInfo) const = 0;
+	virtual int GetClientLatency(int ClientID) const = 0;
 	virtual void SetClientDDNetVersion(int ClientID, int DDNetVersion) = 0;
 	virtual void GetClientAddr(int ClientID, char* pAddrStr, int Size) const = 0;
-
 	virtual void SetStateClientMRPG(int ClientID, bool State) = 0;
 	virtual bool GetStateClientMRPG(int ClientID) const = 0;
-
-	virtual void SetClientNameChangeRequest(int ClientID, const char* pName) = 0;
-	virtual const char* GetClientNameChangeRequest(int ClientID) = 0;
-
 	virtual int GetClientVersion(int ClientID) const = 0;
 	virtual int SendMsg(CMsgPacker *pMsg, int Flags, int ClientID, int64_t Mask = -1, int WorldID = -1) = 0;
+	virtual int SendMotd(int ClientID, const char* pText) = 0;
 
 	bool Translate(int& Target, int Client)
 	{
@@ -123,7 +111,7 @@ public:
 	int SendPackMsgOne(const T* pMsg, int Flags, int ClientID, int64_t Mask, int WorldID)
 	{
 		dbg_assert(ClientID != -1, "SendPackMsgOne called with -1");
-		CMsgPacker Packer(pMsg->ms_MsgID, false);
+		CMsgPacker Packer(pMsg->ms_MsgId, false);
 		if(pMsg->Pack(&Packer))
 			return -1;
 
@@ -136,23 +124,12 @@ public:
 		return SendPackMsgOne(pMsg, Flags, ClientID, Mask, WorldID);
 	}
 
-	int SendPackMsgTranslate(const CNetMsg_Sv_Dialog* pMsg, int Flags, int ClientID, int64_t Mask, int WorldID)
-	{
-		CNetMsg_Sv_Dialog MsgCopy;
-		mem_copy(&MsgCopy, pMsg, sizeof(MsgCopy));
-
-		if(!Translate(MsgCopy.m_LeftClientID, ClientID) || !Translate(MsgCopy.m_RightClientID, ClientID))
-			return 0;
-
-		return SendPackMsgOne(&MsgCopy, Flags, ClientID, Mask, WorldID);
-	}
-	
 	int SendPackMsgTranslate(const CNetMsg_Sv_Emoticon* pMsg, int Flags, int ClientID, int64_t Mask, int WorldID)
 	{
 		CNetMsg_Sv_Emoticon MsgCopy;
 		mem_copy(&MsgCopy, pMsg, sizeof(MsgCopy));
 
-		return Translate(MsgCopy.m_ClientID, ClientID) && SendPackMsgOne(&MsgCopy, Flags, ClientID, Mask, WorldID);
+		return Translate(MsgCopy.m_ClientId, ClientID) && SendPackMsgOne(&MsgCopy, Flags, ClientID, Mask, WorldID);
 	}
 
 	int SendPackMsgTranslate(const CNetMsg_Sv_Chat* pMsg, int Flags, int ClientID, int64_t Mask, int WorldID)
@@ -161,11 +138,11 @@ public:
 		mem_copy(&MsgCopy, pMsg, sizeof(MsgCopy));
 
 		char aBuf[1000];
-		if(MsgCopy.m_ClientID >= 0 && !Translate(MsgCopy.m_ClientID, ClientID))
+		if(MsgCopy.m_ClientId >= 0 && !Translate(MsgCopy.m_ClientId, ClientID))
 		{
-			str_format(aBuf, sizeof(aBuf), "%s: %s", ClientName(MsgCopy.m_ClientID), MsgCopy.m_pMessage);
+			str_format(aBuf, sizeof(aBuf), "%s: %s", ClientName(MsgCopy.m_ClientId), MsgCopy.m_pMessage);
 			MsgCopy.m_pMessage = aBuf;
-			MsgCopy.m_ClientID = VANILLA_MAX_CLIENTS - 1;
+			MsgCopy.m_ClientId = VANILLA_MAX_CLIENTS - 1;
 		}
 
 		return SendPackMsgOne(&MsgCopy, Flags, ClientID, Mask, WorldID);
@@ -185,13 +162,12 @@ public:
 	}
 
 	// World Time
-	virtual int GetMinuteWorldTime() const = 0;
-	virtual int GetHourWorldTime() const = 0;
-	virtual int GetOffsetWorldTime() const = 0;
-	virtual void SetOffsetWorldTime(int Hour) = 0;
-	virtual bool CheckWorldTime(int Hour, int Minute) = 0;
-	virtual const char* GetStringTypeDay() const = 0;
-	virtual int GetEnumTypeDay() const = 0;
+	virtual int GetMinuteGameTime() const = 0;
+	virtual int GetHourGameTime() const = 0;
+	virtual int GetOffsetGameTime() const = 0;
+	virtual void SetOffsetGameTime(int Hour) = 0;
+	virtual const char* GetStringTypeday() const = 0;
+	virtual int GetCurrentTypeday() const = 0;
 
 	// main client functions
 	virtual void SetClientName(int ClientID, char const *pName) = 0;
@@ -199,20 +175,17 @@ public:
 	virtual void SetClientCountry(int ClientID, int Country) = 0;
 	virtual void SetClientScore(int ClientID, int Score) = 0;
 
-	virtual bool IsClientChangesWorld(int ClientID) = 0;
+	virtual bool IsClientChangingWorld(int ClientID) = 0;
 	virtual void ChangeWorld(int ClientID, int NewWorldID) = 0;
-	virtual int GetClientWorldID(int ClientID) = 0;
+	virtual int GetClientWorldID(int ClientID) const = 0;
 	virtual const char* GetWorldName(int WorldID) = 0;
+	virtual CWorldDetail* GetWorldDetail(int WorldID) = 0;
+	virtual bool IsWorldType(int WorldID, WorldType Type) const = 0;
 	virtual int GetWorldsSize() const = 0;
 
+	virtual const char* Localize(int ClientID, const char* pText) = 0;
 	virtual void SetClientLanguage(int ClientID, const char* pLanguage) = 0;
 	virtual const char* GetClientLanguage(int ClientID) const = 0;
-
-	// discord
-	virtual void SendDiscordMessage(const char *pChannel, int Color, const char* pTitle, const char* pText) = 0;
-	virtual void SendDiscordGenerateMessage(const char* pTitle, int AccountID, int Color = 0) = 0;
-	virtual void UpdateDiscordStatus(const char *pStatus) = 0;
-    virtual std::string EscapeDiscordMarkdown(const std::string &input) = 0;
 
 	// Bots
 	virtual void InitClientBot(int ClientID) = 0;
@@ -222,6 +195,9 @@ public:
 	virtual void SnapFreeID(int ID) = 0;
 	virtual void *SnapNewItem(int Type, int ID, int Size) = 0;
 	virtual void SnapSetStaticsize(int ItemType, int Size) = 0;
+
+	template<typename T>
+	T* SnapNewItem(int Id) { return static_cast<T*>(SnapNewItem(T::ms_MsgId, Id, sizeof(T))); }
 
 	enum
 	{
@@ -239,8 +215,9 @@ public:
 
 	virtual int* GetIdMap(int ClientID) = 0;
 
-	virtual void AddAccountNickname(int UID, std::string Nickname) = 0;
+	virtual void UpdateAccountBase(int UID, std::string Nickname, int Rating) = 0;
 	virtual const char* GetAccountNickname(int AccountID) = 0;
+	virtual int GetAccountRank(int AccountID) = 0;
 
 	virtual void ExpireServerInfo() = 0;
 };
@@ -256,14 +233,13 @@ public:
 
 	virtual void OnTick() = 0;
 	virtual void OnTickGlobal() = 0;
-	virtual void OnPreSnap() = 0;
 	virtual void OnSnap(int ClientID) = 0;
 	virtual void OnPostSnap() = 0;
 
+	virtual void OnDaytypeChange(int NewDaytype) = 0;
 	virtual void OnMessage(int MsgID, CUnpacker *pUnpacker, int ClientID) = 0;
-	virtual void ClearClientData(int ClientID) = 0;
-
-	virtual void PrepareClientChangeWorld(int ClientID) = 0;
+	virtual void OnClearClientData(int ClientID) = 0;
+	virtual void OnClientPrepareChangeWorld(int ClientID) = 0;
 
 	virtual void OnClientConnected(int ClientID) = 0;
 	virtual void OnClientEnter(int ClientID) = 0;
@@ -271,23 +247,25 @@ public:
 	virtual void OnClientDirectInput(int ClientID, void *pInput) = 0;
 	virtual void OnClientPredictedInput(int ClientID, void *pInput) = 0;
 
+	virtual void* GetLastInput(int ClientID) const = 0;
+	virtual bool IsClientCharacterExist(int ClientID) const = 0;
 	virtual bool IsClientReady(int ClientID) const = 0;
 	virtual bool IsClientPlayer(int ClientID) const = 0;
 	virtual bool PlayerExists(int ClientID) const = 0;
 
-	virtual void Chat(int ClientID, const char* pText, ...) = 0;
-
 	virtual const char *Version() const = 0;
 	virtual const char *NetVersion() const = 0;
-	virtual int GetRank(int AuthID) = 0;
 
-	/**
-	 * Used to report custom player info to master servers.
-	 *
-	 * @param aBuf Should be the json key values to add, starting with a ',' beforehand, like: ',"skin": "default", "team": 1'
-	 * @param i The client id.
-	 */
-	virtual void OnUpdatePlayerServerInfo(nlohmann::json* pJson, int ClientID) = 0;
+	virtual void OnUpdateClientServerInfo(nlohmann::json* pJson, int ClientID) = 0;
+};
+
+namespace Instance
+{
+	struct Data { inline static class IServer* g_pServer; };
+	static inline IServer* Server() { return Data::g_pServer; }
+	static inline IGameServer* GameServerPlayer(int ClientID = -1) { return Data::g_pServer->GameServerPlayer(ClientID); }
+	static inline IGameServer* GameServer(int WorldID = MAIN_WORLD_ID) { return Data::g_pServer->GameServer(WorldID); }
+	static inline const char* Localize(int ClientID, const char* pText) { return Data::g_pServer->Localize(ClientID, pText); }
 };
 
 extern IGameServer *CreateGameServer();
