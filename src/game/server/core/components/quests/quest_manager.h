@@ -18,7 +18,15 @@ class CQuestManager : public MmoComponent
 	~CQuestManager() override
 	{
 		// free data
-		mystd::freeContainer(CQuestDescription::Data(), CPlayerQuest::Data());
+		for(auto& [AID, vPlayerQuests] : CPlayerQuest::Data())
+		{
+			for(auto [QID, pQuest] : vPlayerQuests)
+				delete pQuest;
+		}
+		CPlayerQuest::Data().clear();
+
+		mystd::freeContainer(CQuestsBoard::Data());
+		mystd::freeContainer(CQuestDescription::Data());
 	}
 
 	void OnPreInit() override;

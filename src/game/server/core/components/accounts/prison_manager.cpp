@@ -47,6 +47,10 @@ void PrisonManager::Release()
 
 	if(const auto* pPlayer = GetPlayer())
 	{
+		const auto& vQuestList = CQuestDescription::Data();
+		if(vQuestList.contains(g_Config.m_SvRelatedJailQuestId))
+			pPlayer->GetQuest(g_Config.m_SvRelatedJailQuestId)->Refuse();
+
 		if(pPlayer->GetCharacter())
 			pPlayer->GetCharacter()->Die(m_ClientID, WEAPON_WORLD);
 
@@ -62,10 +66,11 @@ void PrisonManager::PostTick()
 	if(!m_PrisonTerm.IsActive())
 		return;
 
-	const auto* pPlayer = GetPlayer();
+	auto* pPlayer = GetPlayer();
 	if(!pPlayer || !pPlayer->GetCharacter())
 		return;
 
+	// check valid world id
 	const int JailWorldID = GS()->GetWorldData()->GetJailWorld()->GetID();
 	if(pPlayer->GetCurrentWorldID() != JailWorldID)
 	{
@@ -73,6 +78,7 @@ void PrisonManager::PostTick()
 		return;
 	}
 
+	// check valid position
 	if(!pPlayer->GetCharacter()->GetTiles()->IsActive(TILE_JAIL_ZONE))
 	{
 		const vec2 JailPosition = GS()->GetJailPosition();
@@ -80,6 +86,18 @@ void PrisonManager::PostTick()
 		GS()->Chat(m_ClientID, "You cannot leave the prison!");
 	}
 
+	// special try reduce jail time
+	auto* pCigarettes = pPlayer->GetItem(itPackCigarettes);
+	if(pCigarettes->HasItem())
+	{
+		int Value = pCigarettes->GetValue();
+		GS()->Chat(m_ClientID, "Your time in prison has been reduced.");
+		m_PrisonTerm.ImprisonmentTime -= (Value * 30);
+		pCigarettes->Remove(Value);
+		Save();
+	}
+
+	// check remaining time
 	const int Remaining = m_PrisonTerm.RemainingTime();
 	if((Remaining - 1) <= 0)
 	{
@@ -87,6 +105,7 @@ void PrisonManager::PostTick()
 		return;
 	}
 
+	// send information
 	GS()->Broadcast(m_ClientID, BroadcastPriority::TitleInformation, 50, "Remaining prison time: {} seconds.", Remaining);
 }
 

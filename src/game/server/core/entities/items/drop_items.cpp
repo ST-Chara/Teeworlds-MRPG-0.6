@@ -8,11 +8,11 @@
 enum
 {
 	MAIN_GROUP = 1,
-	NUM_MAIN_IDS = 3,
+	NUM_MAIN_IDS = 2,
 };
 
 CEntityDropItem::CEntityDropItem(CGameWorld *pGameWorld, vec2 Pos, vec2 Vel, float AngleForce, CItem DropItem, int OwnerID)
-: CEntity(pGameWorld, CGameWorld::ENTTYPE_ITEM_DROP, Pos, 24.0f)
+: CEntity(pGameWorld, CGameWorld::ENTTYPE_PICKUP_ITEM, Pos, 24.0f)
 {
 	m_Pos = Pos;
 	m_Vel = Vel;
@@ -143,13 +143,15 @@ void CEntityDropItem::Snap(int SnappingClient)
 		GS()->SnapPickup(SnappingClient, GetID(), m_Pos, POWERUP_ARMOR_LASER);
 	}
 
-	const auto& currencyGroup = GetSnappingGroupIds(MAIN_GROUP);
-	for(int i = 0; i < NUM_MAIN_IDS; i++)
+	if(const auto* pvMainIds = FindSnappingGroupIds(MAIN_GROUP))
 	{
-		float AngleStep = 2.0f * pi / (float)NUM_MAIN_IDS;
-		float AngleStart = (2.0f * pi * (float)Server()->Tick() / (float)Server()->TickSpeed()) * 1.55f;
-		float X = m_Radius * cos(AngleStart + AngleStep * (float)i);
-		float Y = m_Radius * sin(AngleStart + AngleStep * (float)i);
-		GS()->SnapProjectile(SnappingClient, currencyGroup[i], m_Pos + vec2(X, Y), { }, Server()->Tick(), WEAPON_HAMMER);
+		for(int i = 0; i < NUM_MAIN_IDS; i++)
+		{
+			float AngleStep = 2.0f * pi / (float)NUM_MAIN_IDS;
+			float AngleStart = (2.0f * pi * (float)Server()->Tick() / (float)Server()->TickSpeed()) * 1.55f;
+			float X = m_Radius * cos(AngleStart + AngleStep * (float)i);
+			float Y = m_Radius * sin(AngleStart + AngleStep * (float)i);
+			GS()->SnapProjectile(SnappingClient, (*pvMainIds)[i], m_Pos + vec2(X, Y), {}, Server()->Tick(), WEAPON_HAMMER);
+		}
 	}
 }

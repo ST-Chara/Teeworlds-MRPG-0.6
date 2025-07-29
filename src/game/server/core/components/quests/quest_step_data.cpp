@@ -3,7 +3,7 @@
 #include "quest_step_data.h"
 
 #include <game/server/gamecontext.h>
-#include <game/server/core/components/Inventory/InventoryManager.h>
+#include <game/server/core/components/inventory/inventory_manager.h>
 #include "quest_manager.h"
 
 #include <game/server/core/entities/items/drop_quest_items.h>
@@ -33,12 +33,10 @@ void CQuestStepBase::UpdateBot() const
 	const bool ActiveStepBot = IsActiveStep();
 	if(ActiveStepBot && !pPlayerBot)
 	{
-		dbg_msg(PRINT_QUEST_PREFIX, "The mob was not found, but the quest step remains active for players.");
 		pGS->CreateBot(TYPE_BOT_QUEST, m_Bot.m_BotID, m_Bot.m_ID);
 	}
 	else if(!ActiveStepBot && pPlayerBot)
 	{
-		dbg_msg(PRINT_QUEST_PREFIX, "The mob was found, but the quest step is not active for players.");
 		pPlayerBot->MarkForDestroy();
 	}
 }
@@ -68,7 +66,7 @@ bool CQuestStepBase::IsActiveStep() const
 			continue;
 
 		auto* pStep = pQuest->GetStepByMob(QuestBotID);
-		if(!pStep || pStep->m_StepComplete || pStep->m_ClientQuitting)
+		if(!pStep || pStep->m_StepComplete || pStep->m_MarkedForDestroy)
 			continue;
 
 		refActiveByQuest = true;
@@ -92,9 +90,6 @@ CPlayer* CQuestStep::GetPlayer() const
 
 CQuestStep::~CQuestStep()
 {
-	m_ClientQuitting = true;
-	CQuestStep::Update();
-
 	m_aMobProgress.clear();
 	m_aMoveActionProgress.clear();
 }
@@ -142,7 +137,7 @@ bool CQuestStep::Finish()
 	if(!pPlayer->GetQuest(QuestID)->Datafile().Save())
 	{
 		GS()->Chat(pPlayer->GetCID(), "A system error has occurred, contact administrator.");
-		dbg_msg(PRINT_QUEST_PREFIX, "After completing the quest step, unable to save the file.");
+		dbg_msg(PRINT_QUEST_PREFIX, "ERROR: CAN'T SAVE QUEST PROGRESS FILE.");
 		m_StepComplete = false;
 		return false;
 	}
@@ -214,7 +209,7 @@ bool CQuestStep::TryAutoFinish()
 void CQuestStep::AppendDefeatProgress(int DefeatedBotID)
 {
 	const auto* pPlayer = GetPlayer();
-	if(!pPlayer || m_ClientQuitting)
+	if(!pPlayer || m_MarkedForDestroy)
 		return;
 
 	if(m_StepComplete || m_Bot.m_vRequiredDefeats.empty() || !DataBotInfo::IsDataBotValid(DefeatedBotID))
@@ -248,13 +243,12 @@ void CQuestStep::UpdateNavigator()
 {
 	// clearing is quitting or invlaid player
 	auto* pPlayer = GetPlayer();
-	if(m_ClientQuitting || m_StepComplete || !pPlayer || !pPlayer->GetCharacter())
+	if(m_MarkedForDestroy || m_StepComplete || !pPlayer || !pPlayer->GetCharacter())
 	{
 		if(m_pEntNavigator)
 		{
 			delete m_pEntNavigator;
 			m_pEntNavigator = nullptr;
-			dbg_msg("quest_step", "navigator to step (bot) removed successfully!");
 		}
 
 		return;
@@ -267,7 +261,6 @@ void CQuestStep::UpdateNavigator()
 		if(!pNavigator->IsMarkedForDestroy())
 		{
 			m_pEntNavigator = pNavigator;
-			dbg_msg("quest_step", "navigator to step (bot) created successfully!");
 		}
 	}
 }
@@ -276,7 +269,7 @@ void CQuestStep::UpdateObjectives()
 {
 	// clearing is quitting or invlaid player
 	auto* pPlayer = GetPlayer();
-	if(!pPlayer || !pPlayer->GetCharacter() || m_ClientQuitting)
+	if(!pPlayer || !pPlayer->GetCharacter() || m_MarkedForDestroy)
 	{
 		ClearObjectives();
 		return;
@@ -284,7 +277,7 @@ void CQuestStep::UpdateObjectives()
 
 	// check conditions where does not creating objectives
 	auto* pQuest = pPlayer->GetQuest(m_Bot.m_QuestID);
-	if(m_StepComplete || m_ClientQuitting || !m_TaskListReceived || !pQuest ||
+	if(m_StepComplete || !m_TaskListReceived || !pQuest ||
 		pQuest->GetState() != QuestState::Accepted || pQuest->GetStepPos() != m_Bot.m_StepPos)
 	{
 		ClearObjectives();
@@ -364,23 +357,30 @@ void CQuestStep::Update()
 	UpdateObjectives();
 }
 
+void CQuestStep::MarkForDestroy()
+{
+	m_MarkedForDestroy = true;
+}
+
 void CQuestStep::ClearObjectives()
 {
-	for(auto& pPair : m_vpEntitiesDefeatBotNavigator)
-		delete pPair.second;
-	for(auto& pPair : m_vpEntitiesMoveAction)
-		delete pPair.second;
+	if(!m_vpEntitiesDefeatBotNavigator.empty() || !m_vpEntitiesMoveAction.empty())
+	{
+		for(auto& pPair : m_vpEntitiesDefeatBotNavigator)
+			delete pPair.second;
+		for(auto& pPair : m_vpEntitiesMoveAction)
+			delete pPair.second;
 
-	m_vpEntitiesMoveAction.clear();
-	m_vpEntitiesDefeatBotNavigator.clear();
-	dbg_msg("quest_step", "clearing objectives is done");
+		m_vpEntitiesMoveAction.clear();
+		m_vpEntitiesDefeatBotNavigator.clear();
+	}
 }
 
 void CQuestStep::CreateVarietyTypesRequiredItems()
 {
 	// check default action
 	const auto* pPlayer = GetPlayer();
-	if(!pPlayer || !pPlayer->GetCharacter() || m_ClientQuitting)
+	if(!pPlayer || !pPlayer->GetCharacter() || m_MarkedForDestroy)
 		return;
 
 	if(m_StepComplete || m_Bot.m_vRequiredItems.empty())
@@ -399,7 +399,7 @@ void CQuestStep::CreateVarietyTypesRequiredItems()
 		if(Type == QuestBotInfo::TaskRequiredItems::Type::PICKUP)
 		{
 			// check whether items are already available for pickup
-			for(const auto* pHh = (CDropQuestItem*)GS()->m_World.FindFirst(CGameWorld::ENTTYPE_QUEST_DROP); pHh; pHh = (CDropQuestItem*)pHh->TypeNext())
+			for(const auto* pHh = (CDropQuestItem*)GS()->m_World.FindFirst(CGameWorld::ENTTYPE_PICKUP_QUEST); pHh; pHh = (CDropQuestItem*)pHh->TypeNext())
 			{
 				if(pHh->m_ClientID == ClientID && pHh->m_QuestID == m_Bot.m_QuestID && pHh->m_ItemID == RequiredItem.GetID() && pHh->m_Step == m_Bot.m_StepPos)
 					return;

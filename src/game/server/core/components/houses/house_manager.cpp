@@ -2,7 +2,7 @@
 /* If you are missing that file, acquire a complete release at teeworlds.com.                */
 #include "house_manager.h"
 
-#include <game/server/core/components/Inventory/InventoryManager.h>
+#include <game/server/core/components/inventory/inventory_manager.h>
 #include <game/server/gamecontext.h>
 
 #include "entities/house_door.h"
@@ -33,7 +33,7 @@ void CHouseManager::OnInitWorld(const std::string& SqlQueryWhereWorld)
 void CHouseManager::OnTick()
 {
 	// check if we are in the main world
-	if(GS()->GetWorldID() != MAIN_WORLD_ID)
+	if(GS()->GetWorldID() != INITIALIZER_WORLD_ID)
 		return;
 
 	// update houses text
@@ -44,7 +44,7 @@ void CHouseManager::OnTick()
 	}
 }
 
-void CHouseManager::OnTimePeriod(ETimePeriod Period)
+void CHouseManager::OnGlobalTimePeriod(ETimePeriod Period)
 {
 	for(auto& p : CHouse::Data())
 		p->HandleTimePeriod(Period);
@@ -359,21 +359,6 @@ bool CHouseManager::OnPlayerVoteCommand(CPlayer* pPlayer, const char* pCmd, cons
 		return true;
 	}
 
-	// house invited list
-	if(PPSTR(pCmd, "HOUSE_INVITED_LIST_FIND") == 0)
-	{
-		// check valid name
-		if(PPSTR(pText, "NULL") == 0)
-		{
-			GS()->Chat(ClientID, "Use please another name.");
-			return true;
-		}
-
-		str_copy(pPlayer->GetTempData().m_aPlayerSearchBuf, pText, sizeof(pPlayer->GetTempData().m_aPlayerSearchBuf));
-		pPlayer->m_VotesData.UpdateVotesIf(MENU_HOUSE_DOOR_LIST);
-		return true;
-	}
-
 	// extend rent
 	if(PPSTR(pCmd, "HOUSE_EXTEND_RENT") == 0)
 	{
@@ -481,19 +466,22 @@ void CHouseManager::ShowFarmzonesControl(CPlayer* pPlayer) const
 		return;
 
 	// initialize variables
-	int ClientID = pPlayer->GetCID();
-	int FarmzonesNum = (int)pHouse->GetFarmzonesManager()->GetContainer().size();
+	const auto ClientID = pPlayer->GetCID();
+	const auto FarmzonesSize = (int)pHouse->GetFarmzonesManager()->GetContainer().size();
 
 	// information
 	VoteWrapper VInfo(ClientID, VWF_STYLE_STRICT_BOLD | VWF_SEPARATE, "\u2324 Farm zones information");
 	VInfo.Add("You can control your farm zones in the house");
-	VInfo.Add("Your home has: {} farm zones.", FarmzonesNum);
+	VInfo.Add("Your home has: {} farm zones.", FarmzonesSize);
 	VoteWrapper::AddEmptyline(ClientID);
 
 	// farm zones control
 	VoteWrapper VFarmzones(ClientID, VWF_OPEN | VWF_STYLE_SIMPLE, "\u2743 Farm zone's control");
 	for(auto& [ID, Farmzone] : pHouse->GetFarmzonesManager()->GetContainer())
-		VFarmzones.AddMenu(MENU_HOUSE_FARMZONE_SELECT, ID, "Farm {} zone / {}", Farmzone.GetName(), GS()->GetItemInfo(Farmzone.GetItemID())->GetName());
+	{
+		const auto sizeItems = Farmzone.GetNode().m_vItems.size();
+		VFarmzones.AddMenu(MENU_HOUSE_FARMZONE_SELECT, ID, "Farm {} zone / {} variety", Farmzone.GetName(), sizeItems);
+	}
 
 	VoteWrapper::AddEmptyline(ClientID);
 }
@@ -513,7 +501,7 @@ void CHouseManager::ShowFarmzoneEdit(CPlayer* pPlayer, int FarmzoneID) const
 	auto& Node = pFarmzone->GetNode();
 
 	// information
-	VoteWrapper VInfo(ClientID, VWF_SEPARATE | VWF_STYLE_STRICT_BOLD, "\u2741 Farm {} zone", pFarmzone->GetName());
+	VoteWrapper VInfo(ClientID, VWF_ALIGN_TITLE | VWF_SEPARATE | VWF_STYLE_STRICT_BOLD, "\u2741 Farm {} zone", pFarmzone->GetName());
 	VInfo.Add("You can grow a plant on the property");
 	VInfo.Add("Chance: {}%", s_GuildChancePlanting);
 	VoteWrapper::AddEmptyline(ClientID);
@@ -533,8 +521,18 @@ void CHouseManager::ShowFarmzoneEdit(CPlayer* pPlayer, int FarmzoneID) const
 	VoteWrapper VPossiblePlanting(ClientID, VWF_OPEN | VWF_STYLE_SIMPLE, "\u2741 Possible items for planting");
 	for(auto& ID : vItems)
 	{
+		bool AllowPlant = true;
+		for(auto& Elem : Node.m_vItems)
+		{
+			if(Elem.Element == ID)
+			{
+				AllowPlant = false;
+				break;
+			}
+		}
+
 		auto* pPlayerItem = pPlayer->GetItem(ID);
-		if(pPlayerItem->HasItem())
+		if(AllowPlant && pPlayerItem->HasItem())
 		{
 			VPossiblePlanting.AddOption("HOUSE_FARMZONE_TRY_PLANT", FarmzoneID, ID, "Try plant {} (has {})", pPlayerItem->Info()->GetName(), pPlayerItem->GetValue());
 		}
@@ -566,7 +564,9 @@ void CHouseManager::ShowDetail(CPlayer* pPlayer, CHouse* pHouse)
 	else
 	{
 		MHouseDetail.AddText("Owner: {}", pOwnerNickname);
+		MHouseDetail.AddText("Days left: {}", pHouse->GetRentDays());
 	}
+	MHouseDetail.AddSeparateLine();
 	MHouseDetail.Send(MOTD_MENU_PLAYER_HOUSE_DETAIL);
 }
 
@@ -617,7 +617,7 @@ CHouse* CHouseManager::GetHouse(HouseIdentifier ID) const
 
 CHouse* CHouseManager::GetHouseByPos(vec2 Pos) const
 {
-	const auto switchNumber = GS()->Collision()->GetSwitchTileNumberAtIndex(Pos, TILE_SW_HOUSE_ZONE);
+	const auto switchNumber = GS()->Collision()->GetSwitchTileNumberAtTileIndex(Pos, TILE_SW_HOUSE_ZONE);
 	if(!switchNumber)
 		return nullptr;
 
@@ -631,7 +631,7 @@ CHouse* CHouseManager::GetHouseByPos(vec2 Pos) const
 
 CFarmzone* CHouseManager::GetHouseFarmzoneByPos(vec2 Pos) const
 {
-	const auto switchNumber = GS()->Collision()->GetSwitchTileNumberAtIndex(Pos, TILE_SW_HOUSE_ZONE);
+	const auto switchNumber = GS()->Collision()->GetSwitchTileNumberAtTileIndex(Pos, TILE_SW_HOUSE_ZONE);
 	if(!switchNumber)
 		return nullptr;
 

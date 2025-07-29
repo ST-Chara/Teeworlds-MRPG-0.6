@@ -5,6 +5,14 @@
 
 #include "tools/path_finder_result.h"
 
+constexpr float DOOR_ACTIVATION_RADIUS_SQUARED = 128.f * 128.f;
+constexpr float MAX_PERCENT_ATTRIBUTE_ATTACK_SPEED = 600.f;
+constexpr float MAX_PERCENT_ATTRIBUTE_AMMO_REGEN = 800.f;
+constexpr float MAX_PERCENT_ATTRIBUTE_VAMPIRISM = 30.f;
+constexpr float MAX_PERCENT_ATTRIBUTE_CRIT_CHANCE = 30.f;
+constexpr float MAX_PERCENT_ATTRIBUTE_LUCKY = 20.f;
+constexpr float MAX_PERCENT_ATTRIBUTE_LUCKY_DROP = 30.f;
+
 // gathering node
 struct GatheringNode
 {
@@ -21,6 +29,20 @@ struct CTeeInfo
 	int m_UseCustomColor;
 	int m_ColorBody;
 	int m_ColorFeet;
+};
+
+enum EMultiOrbiteType
+{
+	MULTIPLE_ORBITE_TYPE_DEFAULT,
+	MULTIPLE_ORBITE_TYPE_PULSATING,
+	MULTIPLE_ORBITE_TYPE_ELLIPTICAL,
+	MULTIPLE_ORBITE_TYPE_VIBRATION,
+	MULTIPLE_ORBITE_TYPE_VARIABLE_RADIUS,
+	MULTIPLE_ORBITE_TYPE_EIGHT,
+	MULTIPLE_ORBITE_TYPE_LOOPING,
+	MULTIPLE_ORBITE_TYPE_DYNAMIC_CENTER,
+	MULTIPLE_ORBITE_TYPE_ROSE,
+	MULTIPLE_ORBITE_TYPE_HYPOTROCHOID,
 };
 
 // special sounds
@@ -122,12 +144,13 @@ enum ESkill
 	SKILL_MASTER_WEAPON    = 4, // automatic gunfire
 	SKILL_BLESSING_GOD_WAR = 5, // refill ammunition
 	SKILL_ATTACK_TELEPORT  = 6, // ?knockout? teleport
-	SKILL_CURE           = 7, // health recovery cure
+	SKILL_CURE             = 7, // health recovery cure
 	SKILL_PROVOKE          = 8, // provoke
 	SKILL_LAST_STAND       = 9, // energy shield
-	SKILL_MAGIC_BOW       = 10, // energy shield
-	SKILL_HEALING_AURA       = 11, // energy shield
+	SKILL_MAGIC_BOW        = 10, // energy shield
+	SKILL_HEALING_AURA     = 11, // energy shield
 	SKILL_FLAME_WALL       = 12, // energy shield
+	SKILL_HEALING_RIFT     = 13, // attack and heals
 	NUM_SKILLS,
 };
 
@@ -149,6 +172,7 @@ enum ETickState
 	ManaPotionRecast,
 	RefreshClanTitle,
 	RefreshNickLeveling,
+	LastSetSpectatorMode,
 	NUM_TICK,
 };
 
@@ -165,8 +189,21 @@ enum ETimePeriod
 enum class WorldType : int
 {
 	Default,
-	Dungeon,
 	Tutorial,
+	MiniGames,
+	Dungeon,
+	DeepDungeon,
+	TreasureDungeon,
+	PvP,
+};
+
+enum WorldFlags
+{
+	WORLD_FLAG_RATING_SYSTEM = 1 << 0,
+	WORLD_FLAG_CRIME_SCORE = 1 << 1,
+	WORLD_FLAG_LOST_DEATH_GOLD = 1 << 2,
+	WORLD_FLAG_SPAWN_FULL_MANA = 1 << 3,
+	WORLD_FLAG_ALLOWED_PVP = 1 << 4,
 };
 
 // drawboard events
@@ -199,6 +236,7 @@ enum class ProfessionIdentifier : int
 	Miner,
 	Farmer,
 	Fisherman,
+	Loader,
 	NUM_PROFESSIONS,
 };
 
@@ -212,6 +250,7 @@ constexpr const char* GetProfessionName(ProfessionIdentifier profID) noexcept
 		case ProfessionIdentifier::Miner:     return "Miner";
 		case ProfessionIdentifier::Farmer:    return "Farmer";
 		case ProfessionIdentifier::Fisherman: return "Fisherman";
+		case ProfessionIdentifier::Loader:    return "Loader";
 		default:                              return "None";
 	}
 }
@@ -248,6 +287,8 @@ enum class ToplistType : int
 	GuildWealthy,
 	PlayerRating,
 	PlayerWealthy,
+	PlayerExpert,
+	PlayerAttributes,
 	NUM_TOPLIST_TYPES
 };
 
@@ -312,7 +353,13 @@ enum class ItemType : short
 	EquipPickaxe,
 	EquipRake,
 	EquipFishrod,
-	EquipArmor,
+	EquipGloves,
+	EquipHelmetTank,
+	EquipHelmetDPS,
+	EquipHelmetHealer,
+	EquipArmorTank,
+	EquipArmorDPS,
+	EquipArmorHealer,
 	EquipEidolon,
 	EquipPotionHeal,
 	EquipPotionMana,
@@ -340,7 +387,13 @@ inline static ItemType GetItemTypeFromDBSet(const DBSet& dbset) noexcept
 	else if(dbset.hasSet("Equip pickaxe")) return ItemType::EquipPickaxe;
 	else if(dbset.hasSet("Equip rake")) return ItemType::EquipRake;
 	else if(dbset.hasSet("Equip fishrod")) return ItemType::EquipFishrod;
-	else if(dbset.hasSet("Equip armor")) return ItemType::EquipArmor;
+	else if(dbset.hasSet("Equip gloves")) return ItemType::EquipGloves;
+	else if(dbset.hasSet("Equip helmet (tank)")) return ItemType::EquipHelmetTank;
+	else if(dbset.hasSet("Equip helmet (dps)")) return ItemType::EquipHelmetDPS;
+	else if(dbset.hasSet("Equip helmet (healer)")) return ItemType::EquipHelmetHealer;
+	else if(dbset.hasSet("Equip armor (tank)")) return ItemType::EquipArmorTank;
+	else if(dbset.hasSet("Equip armor (dps)")) return ItemType::EquipArmorDPS;
+	else if(dbset.hasSet("Equip armor (healer)")) return ItemType::EquipArmorHealer;
 	else if(dbset.hasSet("Equip eidolon")) return ItemType::EquipEidolon;
 	else if(dbset.hasSet("Equip title")) return ItemType::EquipTitle;
 	else if(dbset.hasSet("Equip potion HP")) return ItemType::EquipPotionHeal;
@@ -353,29 +406,40 @@ inline static ItemType GetItemTypeFromDBSet(const DBSet& dbset) noexcept
 	else return ItemType::Unknown;
 }
 
+constexpr const char* GetSelectorStringByCondition(bool Condition)
+{
+	return Condition ? " <--" : "";
+}
+
 constexpr const char* GetItemTypeName(ItemType type) noexcept
 {
 	switch(type)
 	{
-		case ItemType::EquipHammer:         return "Hammer";
-		case ItemType::EquipGun:            return "Gun";
-		case ItemType::EquipShotgun:        return "Shotgun";
-		case ItemType::EquipGrenade:        return "Grenade";
-		case ItemType::EquipLaser:          return "Laser";
-		case ItemType::EquipPickaxe:        return "Pickaxe";
-		case ItemType::EquipRake:           return "Rake";
-		case ItemType::EquipFishrod:        return "Fish rod";
-		case ItemType::EquipArmor:          return "Armor";
-		case ItemType::EquipEidolon:        return "Eidolon";
-		case ItemType::EquipPotionHeal:     return "Potion HP";
-		case ItemType::EquipPotionMana:     return "Potion MP";
-		case ItemType::EquipTitle:          return "Title";
-		case ItemType::UseSingle:           return "Use Single";
-		case ItemType::UseMultiple:         return "Use Multiple";
-		case ItemType::ResourceHarvestable: return "Resource harvestable";
-		case ItemType::ResourceMineable:    return "Resource mineable";
-		case ItemType::ResourceFishes:      return "Resource fishes";
-		default:                  return "Unknown";
+		case ItemType::EquipHammer:         return "Weapon: Hammer";
+		case ItemType::EquipGun:            return "Weapon: Gun";
+		case ItemType::EquipShotgun:        return "Weapon: Shotgun";
+		case ItemType::EquipGrenade:        return "Weapon: Grenade";
+		case ItemType::EquipLaser:          return "Weapon: Laser";
+		case ItemType::EquipPickaxe:        return "Tool: Pickaxe";
+		case ItemType::EquipRake:           return "Tool: Rake";
+		case ItemType::EquipFishrod:        return "Tool: Fishing Rod";
+		case ItemType::EquipGloves:         return "Tool: Gloves";
+		case ItemType::EquipHelmetTank:     return "Helmet: Tank Role";
+		case ItemType::EquipHelmetDPS:      return "Helmet: DPS Role";
+		case ItemType::EquipHelmetHealer:   return "Helmet: Healer Role";
+		case ItemType::EquipArmorTank:      return "Armor: Tank Role";
+		case ItemType::EquipArmorDPS:       return "Armor: DPS Role";
+		case ItemType::EquipArmorHealer:    return "Armor: Healer Role";
+		case ItemType::EquipEidolon:        return "Accessory: Eidolon";
+		case ItemType::EquipTitle:          return "Cosmetic: Title";
+		case ItemType::EquipPotionHeal:     return "Potion: Health";
+		case ItemType::EquipPotionMana:     return "Potion: Mana";
+		case ItemType::UseSingle:           return "Single-Use Item";
+		case ItemType::UseMultiple:         return "Multi-Use Item";
+		case ItemType::ResourceHarvestable: return "Resource (Harvestable)";
+		case ItemType::ResourceMineable:    return "Resource (Mineable)";
+		case ItemType::ResourceFishes:      return "Resource (Fish)";
+		default:                            return "Unknown";
 	}
 }
 
@@ -417,7 +481,7 @@ enum class AchievementType : int
 	ReceiveItem,
 	HaveItem,
 	CraftItem,
-	UnlockWorld,
+	CompleteQuest,
 	Leveling,
 };
 
@@ -434,7 +498,7 @@ constexpr const char* GetAchievementTypeName(AchievementType typeID) noexcept
 		case AchievementType::ReceiveItem:     return "Receive Item";
 		case AchievementType::HaveItem:        return "Have Item";
 		case AchievementType::CraftItem:       return "Craft Item";
-		case AchievementType::UnlockWorld:     return "Unlock World";
+		case AchievementType::CompleteQuest:   return "Complete Quest";
 		case AchievementType::Leveling:        return "Leveling";
 		default:                               return "Unknown";
 	}
@@ -475,14 +539,17 @@ enum EMenuList
 	MENU_ACCOUNT_DETAIL_INFO,
 	MENU_EQUIPMENT,
 	MENU_INVENTORY,
-	MENU_UPGRADES,
+	MENU_INVENTORY_RANDOMBOX_OPEN,
 	MENU_MODULES,
+
+	// Upgrades
+	MENU_UPGRADES,
+	MENU_UPGRADES_ATTRIBUTES_DETAIL,
 
 	// Settings
 	MENU_SETTINGS,
 	MENU_SETTINGS_ACCOUNT,
 	MENU_SETTINGS_LANGUAGE,
-	MENU_SETTINGS_TITLE,
 
 	// Mailbox
 	MENU_MAILBOX,
@@ -554,9 +621,13 @@ enum EMenuList
 	MENU_CRAFTING_LIST,
 	MENU_CRAFTING_SELECT,
 
+	// Duties
+	MENU_DUTIES_LIST,
+	MENU_DUNGEON_SELECT,
+	MENU_PVP_SELECT,
+
 	// Other menus
 	MENU_LEADERBOARD,
-	MENU_DUNGEONS,
 
 	// motd menus
 	MOTD_MENU_GUILD_HOUSE_DETAIL,
@@ -592,12 +663,14 @@ enum
 		Basic kernel server settings
 		This is where the most basic server settings are stored
 	*/
+	DEFAULT_BASE_HP                = 10,    // default base health
+	DEFAULT_BASE_MP                = 10,    // default base mana
 	MAX_GROUP_MEMBERS              = 4,     // maximum number of players in a group
 	MAX_HOUSE_DOOR_INVITED_PLAYERS = 3,		// maximum player what can have access for house door
 	MAX_DECORATIONS_PER_HOUSE      = 20,    // maximum decorations for houses
 	MAIL_MAX_CAPACITY              = 10,    // maximum number of emails what is displayed
 	MAX_ATTRIBUTES_FOR_ITEM        = 2,	    // maximum number of stats per item
-	POTION_RECAST_APPEND_TIME      = 15,    // recast append time for potion in seconds
+	POTION_RECAST_DEFAULT_TIME      = 15,    // recast append time for potion in seconds
 	DEFAULT_MAX_PLAYER_BAG_GOLD    = 5000,  // player gold limit
 	MIN_SKINCHANGE_CLIENTVERSION   = 0x0703,// minimum client version for skin change
 	MIN_RACE_CLIENTVERSION         = 0x0704,// minimum client version for race type
@@ -609,6 +682,7 @@ enum
 	NOPE                           = -1,
 	itCapsuleSurvivalExperience    = 16,    // Gives 10-50 experience
 	itLittleBagGold                = 17,    // Gives 10-50 gold
+	itPackCigarettes               = 256,   // Pack of cigarettes for reduce jail time
 
 	// potions
 	itPotionManaRegen              = 14,    // Mana regeneration potion
@@ -638,6 +712,20 @@ enum
 	itCustomizer                   = 96,    // Curomizer for personal skins
 	itDamageEqualizer              = 97,    // Module for dissable self dmg
 	itMagnetItems                  = 185,   // Magnetizes items meant for you
+	itBasicHammerPlus              = 316,   // Increase basic hammer range
+	itBreathingReed                = 318,   // Double the time underwater
+	itLifePreserver                = 319,   // Keeps player afloat
+	itDiversKit                    = 320,   // Can't drown, keeps player afloat
+	itFishBait                     = 323,   // Increases chance of hooking by 30%
+	itRingReturnLightning          = 388,   // Reflects a portion of damage by lightning
+	itRingGivingLightning          = 403,   // Lightning on attack with some probability
+	itRingPerfectLightning         = 404,   // Reflects and attacks with lightning at some chance
+	itTeslaInductiveCoil           = 405,   // Increases electro damage by 25%
+
+	// reset upgrades tomes
+	itTomeOfUpgrResetTank          = 399,   // Reset upgrade for Tank
+	itTomeOfUpgrResetDps           = 400,   // Reset upgrade for Dps
+	itTomeOfUpgrResetHealer        = 401,   // Reset upgrade for Healer
 
 	// weapons
 	itHammer                       = 2,     // Equipment Hammers
@@ -652,6 +740,7 @@ enum
 	itRifleMagneticPulse           = 103,   // Equpment Magnetic pulse rifle
 	itRifleTrackedPlazma           = 150,   // Equipment Plazma rifle
 	itGunPulse                     = 151,   // Equipment Pulse gun
+	itRifleTeslaSerpent            = 324,   // Equipment Tesla serpen
 
 	// decoration items
 	itPickupHealth                 = 18,    // Pickup heart
@@ -665,6 +754,7 @@ enum
 	itShowCriticalDamage           = 34,    // Critical damage setting
 	itShowQuestStarNavigator       = 93,    // Show quest path when idle
 	itShowDetailGainMessages       = 98,    // Show detail gain messages
+	itShowOnlyFunctionModules    = 402,   // Show only functional modules tab
 
 	// special events
 	itTittleNewbie                 = 30,    // After tutorial game stage
@@ -678,6 +768,7 @@ enum class BroadcastPriority
 	GameInformation,
 	GamePriority,
 	GameWarning,
+	HiddenBroadcast,
 	MainInformation,
 	TitleInformation,
 	VeryImportant,
@@ -720,6 +811,7 @@ enum class AttributeIdentifier : int
 	EidolonPWR = 19,             // Attribute identifier for eidolon power
 	GoldCapacity = 20,           // Attribute identifier for gold capacity
 	Patience = 21,               // Attribute identifier for fisherman
+	ProductCapacity = 22,        // Attribute identifier for loader
 	ATTRIBUTES_NUM,              // The number of total attributes
 };
 

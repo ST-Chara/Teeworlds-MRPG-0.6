@@ -2,6 +2,7 @@
 /* If you are missing that file, acquire a complete release at teeworlds.com.                */
 #include "tutorial.h"
 
+#include <game/server/core/tools/scenario_player_manager.h>
 #include <game/server/core/scenarios/scenario_universal.h>
 #include <game/server/gamecontext.h>
 
@@ -19,14 +20,12 @@ void CGameControllerTutorial::OnInit()
 
 	// initialize jsonData
 	const std::string jsonRawData = (char*)RawData.data();
-	try
+	bool hasError = mystd::json::parse(jsonRawData, [this](nlohmann::json& j)
 	{
-		m_JsonTutorialData = nlohmann::json::parse(jsonRawData);
-	}
-	catch(const nlohmann::json::parse_error& e)
-	{
-		dbg_msg("scenario-tutorial", "JSON parsing error: %s", e.what());
-	}
+		m_JsonTutorialData = std::move(j);
+	});
+
+	dbg_assert(!hasError, "scenario-tutorial: invalid JSON file.");
 }
 
 void CGameControllerTutorial::Tick()

@@ -27,6 +27,7 @@
 #include <game/server/core/entities/weapons/grenade_pizdamet.h>
 #include <game/server/core/entities/weapons/rifle_magneticpulse.h>
 #include <game/server/core/entities/weapons/rifle_wallpusher.h>
+#include <game/server/core/entities/weapons/rifle_tesla_serpent.h>
 #include <game/server/core/entities/weapons/rifle_trackedplazma.h>
 
 MACRO_ALLOC_POOL_ID_IMPL(CCharacter, MAX_CLIENTS* ENGINE_MAX_WORLDS + MAX_CLIENTS)
@@ -48,6 +49,7 @@ bool CCharacter::Spawn(CPlayer* pPlayer, vec2 Pos)
 {
 	m_pPlayer = pPlayer;
 	m_ClientID = pPlayer->GetCID();
+	m_pPlayer->m_aPlayerTick[LastDamage] = 0;
 
 	m_Mana = 0;
 	m_EmoteStop = -1;
@@ -55,9 +57,10 @@ bool CCharacter::Spawn(CPlayer* pPlayer, vec2 Pos)
 	m_LastNoAmmoSound = -1;
 	m_LastWeapon = WEAPON_HAMMER;
 	m_QueuedWeapon = -1;
+	m_WaterAir = GetMaxWaterAir();
 
 	m_Pos = Pos;
-	m_OldPos = Pos;
+	m_PrevPos = Pos;
 	m_Core.Reset();
 	m_Core.Init(&GS()->m_World.m_Core, GS()->Collision());
 	m_Core.m_ActiveWeapon = WEAPON_HAMMER;
@@ -80,7 +83,6 @@ bool CCharacter::Spawn(CPlayer* pPlayer, vec2 Pos)
 		GS()->Core()->QuestManager()->TryAcceptNextQuestChainAll(m_pPlayer);
 
 		m_pPlayer->m_VotesData.UpdateCurrentVotes();
-		m_AmmoRegen = m_pPlayer->GetTotalAttributeValue(AttributeIdentifier::AmmoRegen);
 		GS()->MarkUpdatedBroadcast(m_ClientID);
 
 		const bool Spawned = GS()->m_pController->OnCharacterSpawn(this);
@@ -111,7 +113,9 @@ bool CCharacter::IsGrounded() const
 		return true;
 	if(GS()->Collision()->CheckPoint(m_Pos.x - GetRadius() / 2, m_Pos.y + GetRadius() / 2 + 5))
 		return true;
-	return false;
+
+	int MoveRestrictionsBelow = GS()->Collision()->GetMoveRestrictions(m_Pos + vec2(0, GetRadius() / 2 + 4), 0.f);
+	return (MoveRestrictionsBelow & CANTMOVE_DOWN) != 0;
 }
 
 bool CCharacter::IsCollisionFlag(int Flag) const
@@ -132,6 +136,11 @@ CPlayer* CCharacter::GetHookedPlayer() const
 	if(m_Core.m_HookState == HOOK_GRABBED)
 		return GS()->GetPlayer(m_Core.m_HookedPlayer);
 	return nullptr;
+}
+
+void CCharacter::SetDoorHit(int ID)
+{
+	m_Core.m_vDoorHitSet.insert(ID);
 }
 
 void CCharacter::DoWeaponSwitch()
@@ -223,14 +232,10 @@ void CCharacter::FireWeapon()
 		// fishing mode
 		if(m_pTilesHandler->IsActive(TILE_FISHING_MODE))
 		{
-			bool ExistEntity = GameWorld()->ExistEntity(m_pFishingRod);
-			if(ExistEntity && m_pFishingRod->IsWaitingState())
-			{
+			if(m_pFishingRod && m_pFishingRod->IsWaitingState())
 				delete m_pFishingRod;
-				m_pFishingRod = nullptr;
-			}
 
-			if(!m_pFishingRod || !ExistEntity)
+			if(!m_pFishingRod)
 			{
 				const auto ForceX = m_LatestInput.m_TargetX * 0.08f;
 				const auto ForceY = m_LatestInput.m_TargetY * 0.08f;
@@ -249,16 +254,18 @@ void CCharacter::FireWeapon()
 		}
 	}
 
+	// fire by weapon
 	const vec2 MouseTarget = vec2(m_LatestInput.m_TargetX, m_LatestInput.m_TargetY);
 	const vec2 Direction = normalize(MouseTarget);
 	const vec2 ProjStartPos = m_Pos + Direction * GetRadius() * 0.75f;
+	const auto TotalWeaponDamage = GetTotalDamageByWeapon(m_Core.m_ActiveWeapon);
 	switch(m_Core.m_ActiveWeapon)
 	{
-		case WEAPON_HAMMER: FireHammer(Direction, ProjStartPos); break;
-		case WEAPON_GUN: FireGun(Direction, ProjStartPos); break;
-		case WEAPON_SHOTGUN: FireShotgun(Direction, ProjStartPos); break;
-		case WEAPON_GRENADE: FireGrenade(Direction, ProjStartPos); break;
-		case WEAPON_LASER: FireRifle(Direction, ProjStartPos); break;
+		case WEAPON_HAMMER: FireHammer(Direction, ProjStartPos, TotalWeaponDamage); break;
+		case WEAPON_GUN: FireGun(Direction, ProjStartPos, TotalWeaponDamage); break;
+		case WEAPON_SHOTGUN: FireShotgun(Direction, ProjStartPos, TotalWeaponDamage); break;
+		case WEAPON_GRENADE: FireGrenade(Direction, ProjStartPos, TotalWeaponDamage); break;
+		case WEAPON_LASER: FireRifle(Direction, ProjStartPos, TotalWeaponDamage); break;
 		case WEAPON_NINJA:
 		{
 			m_Ninja.m_ActivationDir = Direction;
@@ -276,18 +283,21 @@ void CCharacter::FireWeapon()
 
 	if(!m_ReloadTimer)
 	{
-		const int ReloadArt = m_pPlayer->GetTotalAttributeValue(AttributeIdentifier::AttackSPD);
-		m_ReloadTimer = g_pData->m_Weapons.m_aId[m_Core.m_ActiveWeapon].m_Firedelay * Server()->TickSpeed() / (1000 + ReloadArt);
+		constexpr int DefaultSpeed = 1000;
+		const auto SpeedMultiplier = m_pPlayer->GetTotalAttributeChance(AttributeIdentifier::AttackSPD).value_or(100.f) / 100.f;
+		const auto Speed = (float)DefaultSpeed * SpeedMultiplier;
+		m_ReloadTimer = g_pData->m_Weapons.m_aId[m_Core.m_ActiveWeapon].m_Firedelay * Server()->TickSpeed() / round_to_int(Speed);
 	}
 }
 
-bool CCharacter::FireHammer(vec2 Direction, vec2 ProjStartPos)
+bool CCharacter::FireHammer(vec2 Direction, vec2 ProjStartPos, int TotalWeaponDamage)
 {
 	constexpr int MAX_LENGTH_CHARACTERS = 16;
+	const bool IsBot = m_pPlayer->IsBot();
 
 	// check equip state
-	const auto EquippedItem = m_pPlayer->GetEquippedItemID(ItemType::EquipHammer);
-	if(!EquippedItem.has_value())
+	const auto EquippedItemIdOpt = m_pPlayer->GetEquippedSlotItemID(ItemType::EquipHammer);
+	if(!EquippedItemIdOpt.has_value())
 	{
 		GS()->Broadcast(m_pPlayer->GetCID(), BroadcastPriority::GameWarning, 2, "You don't have a hammer equipped.");
 		return false;
@@ -301,9 +311,9 @@ bool CCharacter::FireHammer(vec2 Direction, vec2 ProjStartPos)
 	}
 
 	// lamp hammer
-	if(EquippedItem == itHammerLamp)
+	if(EquippedItemIdOpt == itHammerLamp)
 	{
-		const auto vEntities = GS()->m_World.FindEntities(ProjStartPos, GetRadius() , MAX_LENGTH_CHARACTERS, CGameWorld::ENTTYPE_CHARACTER);
+		const auto vEntities = GS()->m_World.FindEntities(ProjStartPos, 400.f , MAX_LENGTH_CHARACTERS, CGameWorld::ENTTYPE_CHARACTER);
 		for(auto* pEnt : vEntities)
 		{
 			// skip self damage
@@ -323,11 +333,11 @@ bool CCharacter::FireHammer(vec2 Direction, vec2 ProjStartPos)
 
 			// create flying point
 			auto* pPoint = new CEntityFlyingPoint(&GS()->m_World, ProjStartPos, Force, pTarget->GetClientID(), m_ClientID);
-			pPoint->Register([this, Force](CPlayer* pFrom, CPlayer* pPlayer)
+			pPoint->Register([this, Force, TotalWeaponDamage](CPlayer* pFrom, CPlayer* pPlayer)
 			{
 				auto* pChar = pPlayer->GetCharacter();
 				GS()->CreateDeath(pChar->GetPos(), pPlayer->GetCID());
-				pChar->TakeDamage(Force, 0, pFrom->GetCID(), WEAPON_HAMMER);
+				pChar->TakeDamage(Force, TotalWeaponDamage, pFrom->GetCID(), WEAPON_HAMMER);
 			});
 
 			// reload
@@ -339,7 +349,7 @@ bool CCharacter::FireHammer(vec2 Direction, vec2 ProjStartPos)
 	}
 
 	// blast hammer
-	if(EquippedItem == itHammerBlast)
+	if(EquippedItemIdOpt == itHammerBlast)
 	{
 		constexpr float Radius = 128.0f;
 
@@ -356,19 +366,19 @@ bool CCharacter::FireHammer(vec2 Direction, vec2 ProjStartPos)
 			const auto Dist = distance(pTarget->m_Pos, m_Pos);
 			if(Dist < Radius)
 			{
-				GS()->CreateExplosion(pTarget->GetPos(), m_ClientID, WEAPON_HAMMER, 1);
+				GS()->CreateExplosion(pTarget->GetPos(), m_ClientID, WEAPON_HAMMER, TotalWeaponDamage);
 			}
 		}
 
 		// move and visual effect
-		m_Core.m_Vel += Direction * 2.5f;
-		GS()->CreateExplosion(m_Pos, m_ClientID, WEAPON_HAMMER, 0);
+		AddVelocity(Direction * 2.5f);
+		GS()->CreateExplosion(m_Pos, m_ClientID, WEAPON_HAMMER, TotalWeaponDamage);
 		GS()->CreateSound(m_Pos, SOUND_WEAPONS_HAMMER_BLAST_START);
 		return true;
 	}
 
 	// default hammer
-	constexpr float Radius = 3.2f;
+	const float Radius = m_pPlayer->GetItem(itBasicHammerPlus)->IsEquipped() ? 6.4f : 2.4f;
 	const auto vEntities = GS()->m_World.FindEntities(ProjStartPos, GetRadius() * Radius, MAX_LENGTH_CHARACTERS, CGameWorld::ENTTYPE_CHARACTER);
 	for(auto* pEnt : vEntities)
 	{
@@ -383,13 +393,12 @@ bool CCharacter::FireHammer(vec2 Direction, vec2 ProjStartPos)
 		if(!pTarget->IsAllowedPVP(m_ClientID))
 			continue;
 
-		const auto HammerHitPos = length(pTarget->m_Pos - ProjStartPos) > 0.0f
-			? pTarget->m_Pos - normalize(pTarget->m_Pos - ProjStartPos) * GetRadius() * Radius : ProjStartPos;
-		const auto Dir = length(pTarget->m_Pos - m_Pos) > 0.0f ? normalize(pTarget->m_Pos - m_Pos) : vec2(0.f, -1.f);
-		const auto Force = vec2(0.f, -1.f) + normalize(Dir + vec2(0.f, -1.1f)) * 10.0f;
+		const auto Dir = length(pTarget->m_Pos - m_Pos) > 0.0f
+			? normalize(pTarget->m_Pos - m_Pos) : vec2(0.f, -1.f);
+		const auto Force = vec2(0.f, -1.f) + normalize(Dir + vec2(0.f, -1.1f)) * (IsBot ? 5.0f : 10.0f);
 
-		GS()->CreateHammerHit(HammerHitPos);
-		pTarget->TakeDamage(Force, 0, m_ClientID, WEAPON_HAMMER);
+		GS()->CreateHammerHit(pTarget->m_Pos);
+		pTarget->TakeDamage(Force, TotalWeaponDamage, m_ClientID, WEAPON_HAMMER);
 		m_ReloadTimer = Server()->TickSpeed() / 3;
 	}
 
@@ -397,20 +406,20 @@ bool CCharacter::FireHammer(vec2 Direction, vec2 ProjStartPos)
 	return true;
 }
 
-bool CCharacter::FireGun(vec2 Direction, vec2 ProjStartPos)
+bool CCharacter::FireGun(vec2 Direction, vec2 ProjStartPos, int TotalWeaponDamage)
 {
 	// check equip state
-	const auto EquippedItem = m_pPlayer->GetEquippedItemID(ItemType::EquipGun);
-	if(!EquippedItem.has_value())
+	const auto EquippedItemIdOpt = m_pPlayer->GetEquippedSlotItemID(ItemType::EquipGun);
+	if(!EquippedItemIdOpt.has_value())
 	{
 		GS()->Broadcast(m_pPlayer->GetCID(), BroadcastPriority::GameWarning, 2, "You don't have a gun equipped.");
 		return false;
 	}
 
 	// gun pulse
-	if(EquippedItem == itGunPulse)
+	if(EquippedItemIdOpt == itGunPulse)
 	{
-		new CLaser(GameWorld(), m_ClientID, 0, m_Pos, Direction, 400.f, true);
+		new CLaser(GameWorld(), m_ClientID, TotalWeaponDamage, m_Pos, Direction, 400.f, true);
 		GS()->CreateSound(m_Pos, SOUND_WEAPONS_GUN_PULSE_START);
 		return true;
 	}
@@ -425,11 +434,11 @@ bool CCharacter::FireGun(vec2 Direction, vec2 ProjStartPos)
 	return true;
 }
 
-bool CCharacter::FireShotgun(vec2 Direction, vec2 ProjStartPos)
+bool CCharacter::FireShotgun(vec2 Direction, vec2 ProjStartPos, int Damage)
 {
 	// check equip state
-	const auto EquippedItem = m_pPlayer->GetEquippedItemID(ItemType::EquipShotgun);
-	if(!EquippedItem.has_value())
+	const auto EquippedItemIdOpt = m_pPlayer->GetEquippedSlotItemID(ItemType::EquipShotgun);
+	if(!EquippedItemIdOpt.has_value())
 	{
 		GS()->Broadcast(m_pPlayer->GetCID(), BroadcastPriority::GameWarning, 2, "You don't have a shotgun equipped.");
 		return false;
@@ -463,18 +472,18 @@ bool CCharacter::FireShotgun(vec2 Direction, vec2 ProjStartPos)
 	return true;
 }
 
-bool CCharacter::FireGrenade(vec2 Direction, vec2 ProjStartPos)
+bool CCharacter::FireGrenade(vec2 Direction, vec2 ProjStartPos, int Damage)
 {
 	// check equip state
-	const auto EquippedItem = m_pPlayer->GetEquippedItemID(ItemType::EquipGrenade);
-	if(!EquippedItem.has_value())
+	const auto EquippedItemIdOpt = m_pPlayer->GetEquippedSlotItemID(ItemType::EquipGrenade);
+	if(!EquippedItemIdOpt.has_value())
 	{
 		GS()->Broadcast(m_pPlayer->GetCID(), BroadcastPriority::GameWarning, 2, "You don't have a grenade equipped.");
 		return false;
 	}
 
 	// pizdamet
-	if(EquippedItem == itPizdamet)
+	if(EquippedItemIdOpt == itPizdamet)
 	{
 		new CEntityGrenadePizdamet(&GS()->m_World, m_ClientID, ProjStartPos, Direction);
 		m_ReloadTimer = Server()->TickSpeed() / 8;
@@ -491,18 +500,18 @@ bool CCharacter::FireGrenade(vec2 Direction, vec2 ProjStartPos)
 	return true;
 }
 
-bool CCharacter::FireRifle(vec2 Direction, vec2 ProjStartPos)
+bool CCharacter::FireRifle(vec2 Direction, vec2 ProjStartPos, int TotalWeaponDamage)
 {
 	// check equip state
-	const auto EquippedItem = m_pPlayer->GetEquippedItemID(ItemType::EquipLaser);
-	if(!EquippedItem.has_value())
+	const auto EquippedItemIdOpt = m_pPlayer->GetEquippedSlotItemID(ItemType::EquipLaser);
+	if(!EquippedItemIdOpt.has_value())
 	{
 		GS()->Broadcast(m_pPlayer->GetCID(), BroadcastPriority::GameWarning, 2, "You don't have a laser equipped.");
 		return false;
 	}
 
 	// plazma wall
-	if(EquippedItem == itRifleWallPusher)
+	if(EquippedItemIdOpt == itRifleWallPusher)
 	{
 		const auto LifeTime = 5 * Server()->TickSpeed();
 		new CEntityRifleWallPusher(&GS()->m_World, m_ClientID, ProjStartPos, Direction, LifeTime);
@@ -510,23 +519,30 @@ bool CCharacter::FireRifle(vec2 Direction, vec2 ProjStartPos)
 	}
 
 	// Magnetic pulse rifle
-	if(EquippedItem == itRifleMagneticPulse)
+	if(EquippedItemIdOpt == itRifleMagneticPulse)
 	{
 		new CEntityRifleMagneticPulse(&GS()->m_World, m_ClientID, 128.f, ProjStartPos, Direction);
 		return true;
 	}
 
 	// Plazma
-	if(EquippedItem == itRifleTrackedPlazma)
+	if(EquippedItemIdOpt == itRifleTrackedPlazma)
 	{
 		new CEntityRifleTrackedPlazma(&GS()->m_World, m_ClientID, ProjStartPos, Direction);
 		GS()->CreateSound(m_Pos, SOUND_WEAPONS_TRACKED_PLAZMA_START);
 		return true;
 	}
 
+	// Tesla serpen
+	if(EquippedItemIdOpt == itRifleTeslaSerpent)
+	{
+		new CEntityTeslaSerpent(&GS()->m_World, m_ClientID, ProjStartPos, Direction, TotalWeaponDamage, 400.f, 3, 0.5f);
+		GS()->CreateSound(m_Pos, SOUND_LASER_FIRE);
+		return true;
+	}
+
 	// default laser
-	const auto Damage = g_pData->m_Weapons.m_aId[WEAPON_LASER].m_Damage;
-	new CLaser(&GS()->m_World, m_ClientID, Damage, ProjStartPos, Direction, GS()->Tuning()->m_LaserReach, false);
+	new CLaser(&GS()->m_World, m_ClientID, TotalWeaponDamage, ProjStartPos, Direction, GS()->Tuning()->m_LaserReach, false);
 	GS()->CreateSound(m_Pos, SOUND_LASER_FIRE);
 	return true;
 }
@@ -545,9 +561,16 @@ void CCharacter::HandleWeapons()
 
 	if(m_Core.m_aWeapons[m_Core.m_ActiveWeapon].m_Ammo >= 0)
 	{
-		const int AmmoRegenTime = (m_Core.m_ActiveWeapon == (int)WEAPON_GUN ? (Server()->TickSpeed() / 2) : (maximum(5000 - m_AmmoRegen, 1000)) / 10);
-		if(m_Core.m_aWeapons[m_Core.m_ActiveWeapon].m_AmmoRegenStart < 0)
-			m_Core.m_aWeapons[m_Core.m_ActiveWeapon].m_AmmoRegenStart = Server()->Tick() + AmmoRegenTime;
+		{
+			constexpr int DefaultSpeed = 100;
+			const auto SpeedMultiplier = m_pPlayer->GetTotalAttributeChance(AttributeIdentifier::AmmoRegen).value_or(100.f) / 100.f;
+			const auto Speed = (float)DefaultSpeed * SpeedMultiplier;
+			const auto AmmoRegenTime = 500 / round_to_int(Speed);
+			if(m_Core.m_aWeapons[m_Core.m_ActiveWeapon].m_AmmoRegenStart < 0)
+				m_Core.m_aWeapons[m_Core.m_ActiveWeapon].m_AmmoRegenStart = Server()->Tick() +
+				(m_Core.m_ActiveWeapon == (int)WEAPON_GUN ? (Server()->TickSpeed() / 2) : (AmmoRegenTime * Server()->TickSpeed()));
+		}
+
 
 		if(m_Core.m_aWeapons[m_Core.m_ActiveWeapon].m_AmmoRegenStart <= Server()->Tick())
 		{
@@ -584,7 +607,7 @@ void CCharacter::HandleNinja()
 			if(distance(pChar->m_Core.m_Pos, m_Core.m_Pos) < Radius)
 			{
 				if(pChar->GetPlayer()->GetCID() != m_ClientID && pChar->IsAllowedPVP(m_ClientID))
-					pChar->TakeDamage(vec2(0, -10.0f), 1, m_pPlayer->GetCID(), WEAPON_NINJA);
+					pChar->TakeDamage(vec2(0, -10.0f), GetTotalDamageByWeapon(WEAPON_NINJA), m_ClientID, WEAPON_NINJA);
 			}
 		}
 	}
@@ -602,7 +625,10 @@ void CCharacter::HandleHookActions()
 		if(Server()->Tick() % (Server()->TickSpeed() / 2) == 0)
 		{
 			if(m_pPlayer->GetItem(itPoisonHook)->IsEquipped())
-				pHookedPlayer->GetCharacter()->TakeDamage({}, 1, m_ClientID, WEAPON_HAMMER);
+			{
+				const auto DmgSize = maximum(1, translate_to_percent_rest(m_pPlayer->GetTotalAttributeValue(AttributeIdentifier::DMG), 5));
+				pHookedPlayer->GetCharacter()->TakeDamage({}, DmgSize, m_ClientID, WEAPON_GAME);
+			}
 		}
 	}
 	else
@@ -624,12 +650,12 @@ void CCharacter::HandleHookActions()
 	{
 		if(m_pPlayer->GetItem(itExplodeHook)->IsEquipped())
 		{
-			GS()->CreateExplosion(m_Core.m_HookPos, m_ClientID, WEAPON_GUN, 0);
+			GS()->CreateExplosion(m_Core.m_HookPos, m_ClientID, WEAPON_GUN, 0, FORCE_FLAG_CANT_SELF);
 		}
 	}
 }
 
-void CCharacter::AddMultipleOrbite(int Amount, int Type, int Subtype)
+void CCharacter::AddMultipleOrbite(bool Projectile, int Amount, int Type, int Subtype, int Orbitetype)
 {
 	if(!m_pMultipleOrbite)
 	{
@@ -637,15 +663,15 @@ void CCharacter::AddMultipleOrbite(int Amount, int Type, int Subtype)
 		m_pMultipleOrbite->SetClientID(m_pPlayer->GetCID());
 	}
 
-	m_pMultipleOrbite->Add(Amount, Type, Subtype);
+	m_pMultipleOrbite->Add(Projectile, Amount, Type, Projectile ? 0 : Subtype, Orbitetype);
 }
 
-void CCharacter::RemoveMultipleOrbite(int Amount, int Type, int Subtype) const
+void CCharacter::RemoveMultipleOrbite(bool Projectile, int Amount, int Type, int Subtype, int Orbitetype) const
 {
 	if(!m_pMultipleOrbite)
 		return;
 
-	m_pMultipleOrbite->Remove(Amount, Type, Subtype);
+	m_pMultipleOrbite->Remove(Projectile, Amount, Type, Projectile ? 0 : Subtype, Orbitetype);
 }
 
 bool CCharacter::GiveWeapon(int WeaponID, int Ammo)
@@ -657,7 +683,7 @@ bool CCharacter::GiveWeapon(int WeaponID, int Ammo)
 	const auto EquipID = GetEquipByWeapon(WeaponID);
 
 	// remove is unequipped weapon
-	if(!m_pPlayer->IsEquipped(EquipID) && !IsWeaponHammer)
+	if(!m_pPlayer->IsEquippedSlot(EquipID) && !IsWeaponHammer)
 	{
 		RemoveWeapon(WeaponID);
 		return false;
@@ -699,7 +725,7 @@ bool CCharacter::RemoveWeapon(int WeaponID)
 }
 
 // This function sets the character's emote and its duration
-void CCharacter::SetEmote(int Emote, int Sec, bool StartEmoticion)
+void CCharacter::SetEmote(int Emote, int Sec, bool SendEmoticion)
 {
 	// Reset by default emote
 	if(Emote == EMOTE_NORMAL)
@@ -709,21 +735,16 @@ void CCharacter::SetEmote(int Emote, int Sec, bool StartEmoticion)
 		return;
 	}
 
-
-	// Check if the character is alive and the emote has stopped
+	// check if the character is alive and the emote has stopped
 	if(m_EmoteStop < Server()->Tick())
 	{
-		// Set the emote type
 		m_EmoteType = Emote;
-		// Set the time when the emote should stop
 		m_EmoteStop = Server()->Tick() + Sec * Server()->TickSpeed();
 	}
 
-
-	// Check if the emoticion should be started
-	if(StartEmoticion)
+	// check if the emoticion should be started
+	if(SendEmoticion)
 	{
-		// Send the corresponding emoticon based on the emote type
 		if(Emote == EMOTE_BLINK)
 			GS()->SendEmoticon(m_pPlayer->GetCID(), EMOTICON_DOTDOT);
 		else if(Emote == EMOTE_HAPPY)
@@ -822,13 +843,6 @@ void CCharacter::Tick()
 	if(!CanAccessWorld())
 		return;
 
-	// handler's
-	HandleSafeFlags();
-	HandlePlayer();
-	HandleTiles();
-	HandleWeapons();
-	HandleTuning();
-
 	// to end the tick on the destroy caused by the change of worlds
 	if(m_pTilesHandler->IsEnter(TILE_WORLD_SWAPPER))
 	{
@@ -836,36 +850,36 @@ void CCharacter::Tick()
 		return;
 	}
 
+	// pre tick
+	HandleTuning();
+
 	// core
 	m_Core.m_Input = m_Input;
 	m_Core.Tick(true, &m_pPlayer->m_NextTuningParams);
-	m_pPlayer->UpdateTempData(m_Health, m_Mana);
+	m_pPlayer->UpdateSharedCharacterData(m_Health, m_Mana);
+
+	// post tick
+	HandleSafeFlags();
+	HandlePlayer();
+	HandleWeapons();
+	if(!HandleTiles())
+		return;
 
 	// game clipped
 	if(GameLayerClipped(m_Pos) || m_pTilesHandler->IsEnter(TILE_DEATH))
 	{
 		Die(m_pPlayer->GetCID(), WEAPON_SELF);
+		return;
 	}
 
-	// freeze position by old core and current core
-	if(length(m_NormalDoorHit) < 0.1f)
-	{
-		m_OlderPos = m_OldPos;
-		m_OldPos = m_Core.m_Pos;
-	}
+	// prev pos apply move restriction
+	ApplyMoveRestrictions();
 }
 
 void CCharacter::TickDeferred()
 {
 	if(!m_Alive)
 		return;
-
-	// door reset
-	if(length(m_NormalDoorHit) >= 0.1f)
-	{
-		HandleDoorHit();
-		ResetDoorHit();
-	}
 
 	// advance the dummy
 	{
@@ -880,6 +894,7 @@ void CCharacter::TickDeferred()
 	CCharacterCore::CParams CoreTickParams(&m_pPlayer->m_NextTuningParams);
 	m_Core.Move(&CoreTickParams);
 	m_Core.Quantize();
+	m_PrevPos = m_Pos;
 	m_Pos = m_Core.m_Pos;
 	m_TriggeredEvents |= m_Core.m_TriggeredEvents;
 
@@ -921,7 +936,7 @@ bool CCharacter::IncreaseHealth(int Amount)
 	Amount = maximum(Amount, 1);
 	m_Health = clamp(m_Health + Amount, 0, m_pPlayer->GetMaxHealth());
 	GS()->MarkUpdatedBroadcast(m_pPlayer->GetCID());
-	m_pPlayer->SetSnapHealthTick(2);
+	m_pPlayer->ShowHealthNickname(2);
 	return true;
 }
 
@@ -954,7 +969,8 @@ void CCharacter::HandleEventsDeath(int Killer, vec2 Force) const
 	auto* pItemGold = m_pPlayer->GetItem(itGold);
 
 	// loss gold at death
-	if(g_Config.m_SvGoldLossOnDeath)
+	if(GS()->HasWorldFlag(WORLD_FLAG_LOST_DEATH_GOLD) &&
+		g_Config.m_SvGoldLossOnDeath)
 	{
 		const int LossGold = minimum(translate_to_percent_rest(pItemGold->GetValue(), (float)g_Config.m_SvGoldLossOnDeath), pItemGold->GetValue());
 		if(LossGold > 0 && pItemGold->Remove(LossGold))
@@ -968,26 +984,105 @@ void CCharacter::HandleEventsDeath(int Killer, vec2 Force) const
 	}
 
 	// Crime score system
-	if(m_pPlayer->Account()->IsCrimeMaxedOut() && (KillerIsGuardian || KillerIsPlayer))
+	if(GS()->HasWorldFlag(WORLD_FLAG_CRIME_SCORE))
 	{
-		const int Arrest = minimum(translate_to_percent_rest(pItemGold->GetValue(), (float)g_Config.m_SvArrestGoldOnDeath), pItemGold->GetValue());
-		if(Arrest > 0 && pItemGold->Remove(Arrest))
+		if(m_pPlayer->Account()->IsCrimeMaxedOut() && (KillerIsGuardian || KillerIsPlayer))
 		{
-			if(KillerIsPlayer)
+			const int Arrest = minimum(translate_to_percent_rest(pItemGold->GetValue(), (float)g_Config.m_SvArrestGoldOnDeath), pItemGold->GetValue());
+			if(Arrest > 0 && pItemGold->Remove(Arrest))
 			{
-				pKiller->Account()->AddGold(Arrest);
-				GS()->Chat(-1, "'{}' killed '{}', who was wanted. The reward is '{$} gold'!",
-					Server()->ClientName(m_pPlayer->GetCID()), Server()->ClientName(Killer), Arrest);
+				if(KillerIsPlayer)
+				{
+					pKiller->Account()->AddGold(Arrest);
+					GS()->Chat(-1, "'{}' killed '{}', who was wanted. The reward is '{$} gold'!",
+						Server()->ClientName(Killer), Server()->ClientName(m_pPlayer->GetCID()), Arrest);
+				}
+				GS()->Chat(m_ClientID, "Treasury confiscates '{}% ({$})' of your gold.", g_Config.m_SvArrestGoldOnDeath, Arrest);
 			}
-			GS()->Chat(m_ClientID, "Treasury confiscates '{}% ({$})' of your gold.", g_Config.m_SvArrestGoldOnDeath, Arrest);
+
+			m_pPlayer->Account()->GetPrisonManager().Imprison(360);
+			m_pPlayer->Account()->ResetCrimeScore();
+		}
+		else if(KillerIsPlayer)
+		{
+			pKiller->Account()->IncreaseCrime(20);
+		}
+	}
+}
+
+int CCharacter::GetMaxWaterAir() const
+{
+	const auto* pBreathingReed = m_pPlayer->GetItem(itBreathingReed);
+	return pBreathingReed->IsEquipped() ? 16 : 8;
+}
+
+void CCharacter::HandleWater(CTuningParams* pTuningParams)
+{
+	if(!m_pTilesHandler->IsActive(TILE_WATER))
+	{
+		if(Server()->Tick() % Server()->TickSpeed() == 0)
+		{
+			const int maxWaterAir = GetMaxWaterAir();
+			if(m_WaterAir < maxWaterAir)
+				m_WaterAir = minimum(m_WaterAir + 1, maxWaterAir);
 		}
 
-		m_pPlayer->Account()->GetPrisonManager().Imprison(360);
-		m_pPlayer->Account()->ResetCrimeScore();
+		return;
 	}
-	else if(KillerIsPlayer)
+
+	// apply physics
+	bool hasDriverKit = m_pPlayer->GetItem(itDiversKit)->IsEquipped();
+	bool isKeptAfloat = m_pPlayer->GetItem(itLifePreserver)->IsEquipped() || hasDriverKit;
+	pTuningParams->m_Gravity = isKeptAfloat ? -0.05f : 0.15f;
+	pTuningParams->m_GroundFriction = 0.95f;
+	pTuningParams->m_GroundControlSpeed = 250.0f / Server()->TickSpeed();
+	pTuningParams->m_GroundControlAccel = 1.5f;
+	pTuningParams->m_AirFriction = 0.95f;
+	pTuningParams->m_AirControlSpeed = 250.0f / Server()->TickSpeed();
+	pTuningParams->m_AirControlAccel = 1.5f;
+	SetEmote(EMOTE_BLINK, 1, false);
+
+	// is has driver kit disable water air system
+	if(!hasDriverKit)
 	{
-		pKiller->Account()->IncreaseCrime(20);
+		// initialize variables
+		const auto isHeadSubmerged = GS()->Collision()->CheckPoint(vec2(m_Core.m_Pos.x, m_Core.m_Pos.y - 16.f), CCollision::COLFLAG_WATER);
+		const auto maxWaterAir = GetMaxWaterAir();
+		const auto currentTick = Server()->Tick();
+
+		// water air
+		if(isHeadSubmerged)
+		{
+			if(m_WaterAir > 0)
+			{
+				if(Server()->Tick() % SERVER_TICK_SPEED == 0)
+				{
+					m_WaterAir--;
+					GS()->Broadcast(m_pPlayer->GetCID(), BroadcastPriority::GameWarning, SERVER_TICK_SPEED, "Air: {}/{}", m_WaterAir, maxWaterAir);
+				}
+			}
+			else
+			{
+				if(currentTick % SERVER_TICK_SPEED / 2 == 0)
+				{
+					const auto maxHP = m_pPlayer->GetMaxHealth();
+					const auto damageValue = translate_to_percent_rest(maxHP, 10.f);
+					TakeDamage(vec2(0, 0), damageValue, -1, WEAPON_WORLD);
+					GS()->CreateSound(m_Core.m_Pos, SOUND_PLAYER_PAIN_LONG);
+				}
+			}
+		}
+		else
+		{
+			if(m_WaterAir < maxWaterAir)
+			{
+				if(currentTick % SERVER_TICK_SPEED / 4 == 0)
+				{
+					m_WaterAir = minimum(m_WaterAir + 1, maxWaterAir);
+					GS()->Broadcast(m_pPlayer->GetCID(), BroadcastPriority::GameWarning, SERVER_TICK_SPEED, "Air: {}/{}", m_WaterAir, maxWaterAir);
+				}
+			}
+		}
 	}
 }
 
@@ -1006,7 +1101,6 @@ void CCharacter::Die(int Killer, int Weapon)
 	// respawn
 	m_pPlayer->m_aPlayerTick[ETickState::Die] = Server()->Tick() / 2;
 	m_pPlayer->PrepareRespawnTick();
-	GS()->Core()->QuestManager()->Update(m_pPlayer);
 	GS()->m_pController->OnCharacterDeath(m_pPlayer, GS()->GetPlayer(Killer), Weapon);
 
 	// remove from world
@@ -1027,8 +1121,8 @@ void CCharacter::AutoUseHealingPotionIfNeeded() const
 		return;
 
 	// check for equippement potion
-	const auto equippedHeal = m_pPlayer->GetEquippedItemID(ItemType::EquipPotionHeal);
-	TryUsePotion(equippedHeal);
+	const auto EquippedHealPotionOpt = m_pPlayer->GetEquippedSlotItemID(ItemType::EquipPotionHeal);
+	TryUsePotion(EquippedHealPotionOpt);
 }
 
 void CCharacter::AutoUseManaPotionIfNeeded() const
@@ -1042,8 +1136,8 @@ void CCharacter::AutoUseManaPotionIfNeeded() const
 		return;
 
 	// check for equippement potion
-	const auto equippedMana = m_pPlayer->GetEquippedItemID(ItemType::EquipPotionMana);
-	TryUsePotion(equippedMana);
+	const auto EquippedManaPotionOpt = m_pPlayer->GetEquippedSlotItemID(ItemType::EquipPotionMana);
+	TryUsePotion(EquippedManaPotionOpt);
 }
 
 void CCharacter::TryUsePotion(std::optional<int> optItemID) const
@@ -1063,59 +1157,95 @@ void CCharacter::TryUsePotion(std::optional<int> optItemID) const
 	}
 }
 
+void CCharacter::SetVelocity(vec2 NewVelocity)
+{
+	m_Core.m_Vel = ClampVel(m_MoveRestrictions, NewVelocity);
+}
+
+void CCharacter::AddVelocity(vec2 Addition)
+{
+	SetVelocity(m_Core.m_Vel + Addition);
+}
+
+void CCharacter::ApplyMoveRestrictions()
+{
+	if(m_Core.m_Vel.y > 0 && (m_MoveRestrictions & CANTMOVE_DOWN))
+	{
+		m_Core.m_Jumped = 0;
+		m_Core.m_JumpedTotal = 0;
+	}
+
+	m_Core.m_Vel = ClampVel(m_MoveRestrictions, m_Core.m_Vel);
+	m_Core.m_vDoorHitSet.clear();
+}
+
 int CCharacter::GetTotalDamageByWeapon(int Weapon) const
 {
 	int Damage = 0;
 
 	switch(Weapon)
 	{
-		case WEAPON_GUN: Damage = m_pPlayer->GetTotalAttributeValue(AttributeIdentifier::GunDMG); break;
-		case WEAPON_SHOTGUN: Damage = m_pPlayer->GetTotalAttributeValue(AttributeIdentifier::ShotgunDMG); break;
-		case WEAPON_GRENADE: Damage = m_pPlayer->GetTotalAttributeValue(AttributeIdentifier::GrenadeDMG); break;
-		case WEAPON_LASER: Damage = m_pPlayer->GetTotalAttributeValue(AttributeIdentifier::RifleDMG); break;
-		case WEAPON_HAMMER: Damage = m_pPlayer->GetTotalAttributeValue(AttributeIdentifier::HammerDMG); break;
+		case WEAPON_GUN: Damage += m_pPlayer->GetTotalAttributeValue(AttributeIdentifier::GunDMG); break;
+		case WEAPON_SHOTGUN: Damage += m_pPlayer->GetTotalAttributeValue(AttributeIdentifier::ShotgunDMG); break;
+		case WEAPON_GRENADE: Damage += m_pPlayer->GetTotalAttributeValue(AttributeIdentifier::GrenadeDMG); break;
+		case WEAPON_LASER: Damage += m_pPlayer->GetTotalAttributeValue(AttributeIdentifier::RifleDMG); break;
+		case WEAPON_HAMMER: Damage += m_pPlayer->GetTotalAttributeValue(AttributeIdentifier::HammerDMG); break;
 		default: break;
 	}
 
-	Damage += m_pPlayer->GetTotalAttributeValue(AttributeIdentifier::DMG);
 	return Damage;
 }
 
-CPlayer* CCharacter::GetLastAttacker() const
+CPlayer* CCharacter::GetLastPlayerAttacker(int Timeout) const
 {
-	if(m_pPlayer->m_aPlayerTick[LastDamage] > (Server()->Tick() - Server()->TickSpeed() * 2))
+	if(m_pPlayer->m_aPlayerTick[LastDamage] > (Server()->Tick() - Server()->TickSpeed() * Timeout))
 		return GS()->GetPlayer(m_LastDamageByClient);
 	return nullptr;
 }
 
-bool CCharacter::TakeDamage(vec2 Force, int Damage, int FromCID, int Weapon)
+bool CCharacter::TakeDamage(vec2 Force, int Damage, int FromCID, int Weapon, int ForceFlag)
 {
-	constexpr float MaximumVel = 24.f;
+	// apply force
+	bool CanApplyForce = true;
+	if((ForceFlag & FORCE_FLAG_CANT_ALL) || ((ForceFlag & FORCE_FLAG_CANT_SELF) && m_ClientID == FromCID))
+		CanApplyForce = false;
+	if(ForceFlag < 0 || CanApplyForce)
+	{
+		constexpr float MaximumVel = 24.f;
+		vec2 Temp = m_Core.m_Vel + Force;
+		m_Core.m_Vel = ClampVel(m_MoveRestrictions,
+			length(Temp) > MaximumVel ? normalize(Temp) * MaximumVel : Temp);
+	}
 
-	// clamp force vel
-	m_Core.m_Vel += Force;
-	if(length(m_Core.m_Vel) > MaximumVel)
-		m_Core.m_Vel = normalize(m_Core.m_Vel) * MaximumVel;
 
-	// check disallow damage
+	// check allowed can damage
 	if(!IsAllowedPVP(FromCID))
 		return false;
 
-	// check valid from
-	auto* pFrom = GS()->GetPlayer(FromCID);
-	if(!pFrom || !pFrom->GetCharacter())
-		return false;
-
 	// damage calculation
-	Damage += pFrom->GetCharacter()->GetTotalDamageByWeapon(Weapon);
-	Damage = (FromCID == m_pPlayer->GetCID() ? maximum(1, Damage / 2) : maximum(1, Damage));
+	auto* pFrom = GS()->GetPlayer(FromCID);
+	if(pFrom && pFrom->GetCharacter() &&
+		Weapon != WEAPON_GAME && Weapon != WEAPON_WORLD)
+	{
+		Damage += pFrom->GetTotalAttributeValue(AttributeIdentifier::DMG);
+		Damage = (FromCID == m_pPlayer->GetCID() ? maximum(1, Damage / 2) : maximum(1, Damage));
+	}
+
+	// skip empty damage
+	if(!Damage)
+		return false;
 
 	// chances of effects
 	int CritDamage = 0;
-	if(FromCID != m_pPlayer->GetCID())
+	if(pFrom && pFrom->GetCharacter() && FromCID != m_pPlayer->GetCID())
 	{
+		// try activate ring lightning
+		TryActivateChainLightning(itRingReturnLightning, Damage);
+		pFrom->GetCharacter()->TryActivateChainLightning(itRingGivingLightning, Damage);
+
 		// vampirism replenish your health
-		if(m_pPlayer->GetAttributeChance(AttributeIdentifier::Vampirism) > random_float(100.0f))
+		const auto ChanceVampirism = m_pPlayer->GetTotalAttributeChance(AttributeIdentifier::Vampirism).value_or(0.f);
+		if(ChanceVampirism > random_float(100.0f))
 		{
 			const auto Recovery = maximum(1, Damage / 2);
 			pFrom->GetCharacter()->IncreaseHealth(Recovery);
@@ -1124,14 +1254,16 @@ bool CCharacter::TakeDamage(vec2 Force, int Damage, int FromCID, int Weapon)
 		}
 
 		// miss out on damage
-		if(m_pPlayer->GetAttributeChance(AttributeIdentifier::Lucky) > random_float(100.0f))
+		const auto ChanceLucky = m_pPlayer->GetTotalAttributeChance(AttributeIdentifier::Lucky).value_or(0.f);
+		if(ChanceLucky > random_float(100.0f))
 		{
 			GS()->SendEmoticon(m_pPlayer->GetCID(), EMOTICON_HEARTS);
 			return false;
 		}
 
 		// critical damage
-		if(m_pPlayer->GetAttributeChance(AttributeIdentifier::Crit) > random_float(100.0f))
+		const auto ChanceCrit = m_pPlayer->GetTotalAttributeChance(AttributeIdentifier::Crit).value_or(0.f);
+		if(ChanceCrit > random_float(100.0f))
 		{
 			const int CritAttributeDMG = maximum(pFrom->GetTotalAttributeValue(AttributeIdentifier::CritDMG), 1);
 			CritDamage = (CritAttributeDMG / 2) + rand() % CritAttributeDMG;
@@ -1153,21 +1285,26 @@ bool CCharacter::TakeDamage(vec2 Force, int Damage, int FromCID, int Weapon)
 	m_EmoteType = EMOTE_PAIN;
 	m_EmoteStop = Server()->Tick() + 500 * Server()->TickSpeed() / 1000;
 	m_LastDamageByClient = FromCID;
-	m_pPlayer->SetSnapHealthTick(2);
+	m_pPlayer->ShowHealthNickname(2);
 	m_pPlayer->m_aPlayerTick[LastDamage] = Server()->Tick();
-	//dbg_msg("test", "[dmg:%d crit:%d, weapon:%d] damage %s to %s / star num %d",
-	//	Damage, IsCriticalDamage, pFrom->GetCharacter()->m_Core.m_ActiveWeapon, pFrom->IsBot() ? "bot" : "player", m_pPlayer->IsBot() ? "bot" : "player", StarNum);
 
+	// last stand effect
 	if(m_pPlayer->m_Effects.IsActive("LastStand"))
-	{
 		m_Health = maximum(1, m_Health);
+
+	// create hit sound damage
+	if(pFrom)
+	{
+		if(FromCID != m_pPlayer->GetCID())
+		{
+			pFrom->m_aPlayerTick[LastDamage] = Server()->Tick();
+			GS()->CreatePlayerSound(FromCID, SOUND_HIT);
+		}
+
+		if(IsCriticalDamage && pFrom->GetItem(itShowCriticalDamage)->IsEquipped())
+			GS()->Chat(FromCID, ":: Crit damage: {}p.", Damage);
 	}
 
-	if(FromCID != m_pPlayer->GetCID())
-	{
-		pFrom->m_aPlayerTick[LastDamage] = Server()->Tick();
-		GS()->CreatePlayerSound(FromCID, SOUND_HIT);
-	}
 	GS()->CreateSound(m_Pos, DamageSoundId);
 	GS()->CreateDamage(m_Pos, FromCID, StarNum, IsCriticalDamage);
 	GS()->MarkUpdatedBroadcast(m_pPlayer->GetCID());
@@ -1176,10 +1313,8 @@ bool CCharacter::TakeDamage(vec2 Force, int Damage, int FromCID, int Weapon)
 	// verify death
 	if(m_Health <= 0)
 	{
-		if(FromCID != m_pPlayer->GetCID() && pFrom->GetCharacter())
-		{
+		if(pFrom && pFrom->GetCharacter() && FromCID != m_pPlayer->GetCID())
 			pFrom->GetCharacter()->SetEmote(EMOTE_HAPPY, 1, false);
-		}
 
 		// do not kill the bot it is still running in CCharacterBotAI::TakeDamage
 		if(m_pPlayer->IsBot())
@@ -1208,7 +1343,7 @@ void CCharacter::Snap(int SnappingClient)
 	const bool BlockingInputFireWeapon = Server()->Input()->IsBlockedInputGroup(m_pPlayer->GetCID(), BLOCK_INPUT_FIRE);
 
 	// write down the m_Core
-	if(!m_ReckoningTick || GS()->m_World.m_Paused)
+	if(!m_ReckoningTick)
 	{
 		// no dead reckoning when paused because the client doesn't know
 		// how far to perform the reckoning
@@ -1299,7 +1434,7 @@ void CCharacter::Snap(int SnappingClient)
 	DDNetFlag(CHARACTERFLAG_IN_FREEZE, m_Core.m_IsInFreeze);
 	DDNetFlag(CHARACTERFLAG_PRACTICE_MODE, BlockingInputFireWeapon);
 	DDNetFlag(CHARACTERFLAG_LOCK_MODE, false);
-	DDNetFlag(CHARACTERFLAG_TEAM0_MODE, m_pTilesHandler->IsActive(TILE_FISHING_MODE));
+	DDNetFlag(CHARACTERFLAG_TEAM0_MODE, false);
 	DDNetFlag(CHARACTERFLAG_INVINCIBLE, false);
 
 	pDDNetCharacter->m_FreezeEnd = 0;
@@ -1321,27 +1456,63 @@ void CCharacter::PostSnap()
 	m_TriggeredEvents = 0;
 }
 
-void CCharacter::HandleTiles()
+bool CCharacter::HandleTiles()
 {
-	// handle tilesets
-	m_pTilesHandler->Handle(m_Core.m_Pos);
+	// handle Anti-Skip tiles
+	int CurrentIndex = GS()->Collision()->GetMapIndex(m_Pos);
+	std::vector<int> vIndices = GS()->Collision()->GetMapIndices(m_PrevPos, m_Pos);
+	if(!vIndices.empty())
+	{
+		for(int& Index : vIndices)
+		{
+			HandleTilesImpl(Index);
+			if(!m_Alive)
+				return false;
+		}
+	}
+	else
+	{
+		HandleTilesImpl(CurrentIndex);
+		if(!m_Alive)
+			return false;
+	}
+
+	return true;
+}
+
+static bool IsDoorHitActive(int Number, void* pUser)
+{
+	auto* pChar = (CCharacter*)pUser;
+	return pChar ? pChar->m_Core.m_vDoorHitSet.contains(Number) : false;
+}
+
+void CCharacter::HandleTilesImpl(int Index)
+{
+	m_pTilesHandler->Handle(Index);
+	m_MoveRestrictions = GS()->Collision()->GetMoveRestrictions(&IsDoorHitActive, this, m_Pos, 18.0f);
 
 	// teleport
 	if(m_pTilesHandler->IsActive(TILE_TELE_FROM))
 	{
-		if(const auto outsPos = GS()->Collision()->TryGetTeleportOut(m_Core.m_Pos))
+		if(const auto outsPos = GS()->Collision()->TryGetTeleportOut(m_Pos))
 			ChangePosition(outsPos.value());
 	}
 
 	// confirm teleport
 	if(m_pTilesHandler->IsActive(TILE_TELE_FROM_CONFIRM))
 	{
-		if(const auto outsPos = GS()->Collision()->TryGetTeleportOut(m_Core.m_Pos))
+		if(const auto outsPos = GS()->Collision()->TryGetTeleportOut(m_Pos))
 		{
 			GS()->Broadcast(m_ClientID, BroadcastPriority::TitleInformation, Server()->TickSpeed(), "Use the hammer to enter");
 			if(m_Core.m_ActiveWeapon == WEAPON_HAMMER && m_ReloadTimer)
 				ChangePosition(outsPos.value());
 		}
+	}
+
+	// water effect enter exit
+	if(m_pTilesHandler->IsEnter(TILE_WATER) || m_pTilesHandler->IsExit(TILE_WATER))
+	{
+		GS()->CreateDeath(m_Pos, m_ClientID);
 	}
 
 	// handle locked view camera and tile interactions if the player is not a bot
@@ -1352,20 +1523,15 @@ void CCharacter::HandleTiles()
 		{
 			GS()->Broadcast(m_ClientID, BroadcastPriority::GameBasicStats, 100, "Use 'Fire' to start fishing!");
 		}
-		else if(m_pTilesHandler->IsExit(TILE_FISHING_MODE) && GameWorld()->ExistEntity(m_pFishingRod))
+		else if(m_pTilesHandler->IsExit(TILE_FISHING_MODE) && m_pFishingRod)
 		{
 			delete m_pFishingRod;
-			m_pFishingRod = nullptr;
 		}
-
-		// locked view cam
-		if(const auto result = GS()->Collision()->TryGetFixedCamPos(m_Core.m_Pos))
-			m_pPlayer->LockedView().ViewLock(result->first, result->second);
 
 		// zone information
 		if(m_pTilesHandler->IsActive(TILE_SW_ZONE))
 		{
-			const auto pZone = GS()->Collision()->GetZonedetail(m_Core.m_Pos);
+			const auto pZone = GS()->Collision()->GetZonedetail(m_Pos);
 			if(pZone && ((Server()->Tick() % Server()->TickSpeed() == 0) || m_Zonename != pZone->Name))
 			{
 				m_Zonename = pZone->Name;
@@ -1381,25 +1547,19 @@ void CCharacter::HandleTiles()
 
 		// chairs
 		if(m_pTilesHandler->IsActive(TILE_CHAIR_LV1))
-		{
-			m_pPlayer->Account()->HandleChair(1, 1);
-		}
+			m_pPlayer->Account()->HandleChair(1);
 		if(m_pTilesHandler->IsActive(TILE_CHAIR_LV2))
-		{
-			m_pPlayer->Account()->HandleChair(3, 3);
-		}
+			m_pPlayer->Account()->HandleChair(7);
 		if(m_pTilesHandler->IsActive(TILE_CHAIR_LV3))
-		{
-			m_pPlayer->Account()->HandleChair(5, 5);
-		}
+			m_pPlayer->Account()->HandleChair(15);
+
+		// locked view cam
+		if(const auto result = GS()->Collision()->TryGetFixedCamPos(m_Pos))
+			m_pPlayer->LockedView().ViewLock(result->first, result->second);
 
 		// check from components
 		GS()->Core()->OnCharacterTile(this);
 	}
-
-	// water effect enter exit
-	if(m_pTilesHandler->IsEnter(TILE_WATER) || m_pTilesHandler->IsExit(TILE_WATER))
-		GS()->CreateDeath(m_Core.m_Pos, m_ClientID);
 }
 
 void CCharacter::GiveRandomEffects(int To)
@@ -1471,7 +1631,7 @@ void CCharacter::MovingDisable(bool State)
 		ResetHook();
 	}
 	m_Core.m_MovingDisabled = State;
-};
+}
 
 void CCharacter::HandleIndependentTuning()
 {
@@ -1492,18 +1652,8 @@ void CCharacter::HandleIndependentTuning()
 		pTuningParams->m_HookDragAccel = 0.f;
 	}
 
-	// water
-	if(m_pTilesHandler->IsActive(TILE_WATER))
-	{
-		pTuningParams->m_Gravity = -0.05f;
-		pTuningParams->m_GroundFriction = 0.95f;
-		pTuningParams->m_GroundControlSpeed = 250.0f / Server()->TickSpeed();
-		pTuningParams->m_GroundControlAccel = 1.5f;
-		pTuningParams->m_AirFriction = 0.95f;
-		pTuningParams->m_AirControlSpeed = 250.0f / Server()->TickSpeed();
-		pTuningParams->m_AirControlAccel = 1.5f;
-		SetEmote(EMOTE_BLINK, 1, false);
-	}
+	// handle water
+	HandleWater(pTuningParams);
 
 	// potions and buffs are different
 	HandleBuff(pTuningParams);
@@ -1545,16 +1695,15 @@ void CCharacter::HandleBuff(CTuningParams* TuningParams)
 		// fire
 		if(m_pPlayer->m_Effects.IsActive("Fire"))
 		{
-			const int ExplodeDamageSize = translate_to_percent_rest(m_pPlayer->GetMaxHealth(), 3);
-			GS()->CreateExplosion(m_Core.m_Pos, m_pPlayer->GetCID(), WEAPON_GRENADE, 0);
-			TakeDamage(vec2(0, 0), ExplodeDamageSize, m_pPlayer->GetCID(), WEAPON_SELF);
+			const int ExplDmg = translate_to_percent_rest(m_pPlayer->GetMaxHealth(), 3);
+			GS()->CreateExplosion(m_Core.m_Pos, -1, WEAPON_GAME, ExplDmg);
 		}
 
 		// poison
 		if(m_pPlayer->m_Effects.IsActive("Poison"))
 		{
-			const int PoisonSize = translate_to_percent_rest(m_pPlayer->GetMaxHealth(), 3);
-			TakeDamage(vec2(0, 0), PoisonSize, m_pPlayer->GetCID(), WEAPON_SELF);
+			const int PoisonDmg = translate_to_percent_rest(m_pPlayer->GetMaxHealth(), 3);
+			TakeDamage({}, PoisonDmg, -1, WEAPON_GAME);
 		}
 
 		// handle potions
@@ -1617,7 +1766,6 @@ void CCharacter::UpdateEquippedStats(std::optional<int> UpdatedItemID)
 	if(m_Health > MaxHealth)
 	{
 		GS()->Chat(m_pPlayer->GetCID(), "Your health has been reduced.");
-		GS()->Chat(m_pPlayer->GetCID(), "You may have removed equipment that increased it.");
 		m_Health = MaxHealth;
 	}
 
@@ -1626,7 +1774,6 @@ void CCharacter::UpdateEquippedStats(std::optional<int> UpdatedItemID)
 	if(m_Mana > MaxMana)
 	{
 		GS()->Chat(m_pPlayer->GetCID(), "Your mana has been reduced.");
-		GS()->Chat(m_pPlayer->GetCID(), "You may have removed equipment that increased it.");
 		m_Mana = MaxMana;
 	}
 
@@ -1645,35 +1792,30 @@ void CCharacter::UpdateEquippedStats(std::optional<int> UpdatedItemID)
 	if(UpdatedItemID.has_value())
 	{
 		const auto* pItemInfo = GS()->GetItemInfo(*UpdatedItemID);
-		if(auto* pChar = m_pPlayer->GetCharacter())
-		{
-			// weapon
-			const auto Type = pItemInfo->GetType();
-			const auto WeaponID = GetWeaponByEquip(Type);
-			if(WeaponID >= WEAPON_HAMMER)
-			{
-				const auto Ammo = (WeaponID == WEAPON_HAMMER ? -1 : 3);
-				pChar->GiveWeapon(WeaponID, Ammo);
-			}
 
-			// eidolon
-			if(Type == ItemType::EquipEidolon)
-			{
-				m_pPlayer->TryRemoveEidolon();
-				m_pPlayer->TryCreateEidolon();
-			}
+		// weapon
+		const auto Type = pItemInfo->GetType();
+		const auto WeaponID = GetWeaponByEquip(Type);
+		if(WeaponID >= WEAPON_HAMMER)
+		{
+			const auto Ammo = (WeaponID == WEAPON_HAMMER ? -1 : 3);
+			GiveWeapon(WeaponID, Ammo);
 		}
 
-		// update ammo regeneration if applicable
-		const int AmmoRegen = pItemInfo->GetInfoEnchantStats(AttributeIdentifier::AmmoRegen);
-		if(AmmoRegen > 0)
-			m_AmmoRegen = m_pPlayer->GetTotalAttributeValue(AttributeIdentifier::AmmoRegen);
-	}
-}
+		// eidolon
+		if(Type == ItemType::EquipEidolon)
+		{
+			m_pPlayer->TryRemoveEidolon();
+			m_pPlayer->TryCreateEidolon();
+		}
 
-void CCharacter::SetDoorHit(vec2 Start, vec2 End)
-{
-	m_NormalDoorHit = GS()->Collision()->GetDoorNormal(Start, End, m_Core.m_Pos);
+		// check and limit ammo
+		int totalRealAmmo = 10 + m_pPlayer->GetTotalAttributeValue(AttributeIdentifier::Ammo);
+		m_Core.m_aWeapons[WEAPON_GUN].m_Ammo = minimum(m_Core.m_aWeapons[WEAPON_GUN].m_Ammo, totalRealAmmo);
+		m_Core.m_aWeapons[WEAPON_SHOTGUN].m_Ammo = minimum(m_Core.m_aWeapons[WEAPON_SHOTGUN].m_Ammo, totalRealAmmo);
+		m_Core.m_aWeapons[WEAPON_GRENADE].m_Ammo = minimum(m_Core.m_aWeapons[WEAPON_GRENADE].m_Ammo, totalRealAmmo);
+		m_Core.m_aWeapons[WEAPON_LASER].m_Ammo = minimum(m_Core.m_aWeapons[WEAPON_LASER].m_Ammo, totalRealAmmo);
+	}
 }
 
 void CCharacter::HandlePlayer()
@@ -1692,47 +1834,48 @@ void CCharacter::HandlePlayer()
 	HandleHookActions();
 }
 
-bool CCharacter::IsAllowedPVP(int FromID) const
+bool CCharacter::IsAllowedPVP(int FromCID) const
 {
-	CPlayer* pFrom = GS()->GetPlayer(FromID, false, true);
-
-	// Dissable self damage without some item
-	if(!pFrom || (FromID == m_pPlayer->GetCID() && m_pPlayer->GetItem(itDamageEqualizer)->IsEquipped()))
-		return false;
-
-	// Check if damage is disabled for the current object or the object it is interacting with
-	if(m_Core.m_DamageDisabled || pFrom->GetCharacter()->m_Core.m_DamageDisabled)
-		return false;
-
-	// disable damage on safe area
-	if(GS()->Collision()->GetCollisionFlagsAt(m_Core.m_Pos) & CCollision::COLFLAG_SAFE
-		|| GS()->Collision()->GetCollisionFlagsAt(pFrom->GetCharacter()->m_Core.m_Pos) & CCollision::COLFLAG_SAFE)
-		return false;
-
-	if(pFrom->IsBot())
+	if(auto* pFrom = GS()->GetPlayer(FromCID, false, true))
 	{
-		// can damage bot
-		const auto* pBotChar = dynamic_cast<CCharacterBotAI*>(pFrom->GetCharacter());
-		if(!pBotChar->AI()->CanDamage(m_pPlayer))
-			return false;
-	}
-	else
-	{
-		// anti pvp on safe world or dungeon
-		if(!GS()->IsAllowedPVP() || GS()->IsWorldType(WorldType::Dungeon))
+		// dissable self damage from weapons
+		if(FromCID == m_pPlayer->GetCID() && m_pPlayer->GetItem(itDamageEqualizer)->IsEquipped())
 			return false;
 
-		// only for unself player
-		if(FromID != m_pPlayer->GetCID())
+		// Check if damage is disabled for the current object or the object it is interacting with
+		if(m_Core.m_DamageDisabled || pFrom->GetCharacter()->m_Core.m_DamageDisabled)
+			return false;
+
+		// disable damage on safe area
+		if(GS()->Collision()->GetCollisionFlagsAt(m_Core.m_Pos) & CCollision::COLFLAG_SAFE
+			|| GS()->Collision()->GetCollisionFlagsAt(pFrom->GetCharacter()->m_Core.m_Pos) & CCollision::COLFLAG_SAFE)
+			return false;
+
+		if(pFrom->IsBot())
 		{
-			// anti pvp for guild players
-			if(m_pPlayer->Account()->IsClientSameGuild(FromID))
+			// can damage bot
+			const auto* pBotChar = dynamic_cast<CCharacterBotAI*>(pFrom->GetCharacter());
+			if(!pBotChar->AI()->CanDamage(m_pPlayer))
+				return false;
+		}
+		else
+		{
+			// anti pvp on safe world or dungeon
+			if(!GS()->IsAllowedPVP() || GS()->IsWorldType(WorldType::Dungeon))
 				return false;
 
-			// anti pvp for group players
-			GroupData* pGroup = m_pPlayer->Account()->GetGroup();
-			if(pGroup && pGroup->HasAccountID(pFrom->Account()->GetID()))
-				return false;
+			// only for unself player
+			if(FromCID != m_pPlayer->GetCID())
+			{
+				// anti pvp for guild players
+				if(m_pPlayer->Account()->IsClientSameGuild(FromCID))
+					return false;
+
+				// anti pvp for group players
+				GroupData* pGroup = m_pPlayer->Account()->GetGroup();
+				if(pGroup && pGroup->HasAccountID(pFrom->Account()->GetID()))
+					return false;
+			}
 		}
 	}
 
@@ -1747,19 +1890,31 @@ bool CCharacter::CanAccessWorld() const
 		const auto* pAccount = m_pPlayer->Account();
 		if(pAccount->GetLevel() < GS()->GetWorldData()->GetRequiredLevel())
 		{
-			m_pPlayer->GetTempData().ClearSpawnPosition();
+			m_pPlayer->GetSharedData().ClearSpawnPosition();
 			GS()->Chat(m_pPlayer->GetCID(), "You were magically transported!");
-			m_pPlayer->ChangeWorld(MAIN_WORLD_ID);
+			m_pPlayer->ChangeWorld(BASE_GAME_WORLD_ID);
 			return false;
 		}
 
 		// check finished tutorial
-		if(!m_pPlayer->GetItem(itTittleNewbie)->HasItem() && !GS()->IsPlayerInWorld(m_ClientID, TUTORIAL_WORLD_ID))
+		/*if(!m_pPlayer->GetItem(itTittleNewbie)->HasItem() && !GS()->IsPlayerInWorld(m_ClientID, TUTORIAL_WORLD_ID))
 		{
-			m_pPlayer->GetTempData().ClearSpawnPosition();
+			m_pPlayer->GetSharedData().ClearSpawnPosition();
 			GS()->Chat(m_pPlayer->GetCID(), "You need to complete the Tutorial.");
 			m_pPlayer->ChangeWorld(TUTORIAL_WORLD_ID);
 			return false;
+		}*/
+
+		// TODO: remove how realized tutorial scenario
+		if(GS()->IsPlayerInWorld(m_ClientID, TUTORIAL_WORLD_ID))
+		{
+			auto* pNewbieTittle = m_pPlayer->GetItem(itTittleNewbie);
+			if(!pNewbieTittle->HasItem())
+				pNewbieTittle->Add(1);
+
+			m_pPlayer->GetSharedData().ClearSpawnPosition();
+			GS()->Chat(m_pPlayer->GetCID(), "You need to complete the Tutorial.");
+			m_pPlayer->ChangeWorld(BASE_GAME_WORLD_ID);
 		}
 	}
 	return true;
@@ -1770,14 +1925,14 @@ bool CCharacter::TryUseMana(int Mana)
 	if(m_Mana < Mana)
 	{
 		GS()->Broadcast(m_pPlayer->GetCID(), BroadcastPriority::GameWarning, 100, "Mana is required for the casting or continuation of this spell.");
-		return true;
+		return false;
 	}
 
 	m_Mana -= Mana;
 
 	GS()->MarkUpdatedBroadcast(m_pPlayer->GetCID());
 	AutoUseManaPotionIfNeeded();
-	return false;
+	return true;
 }
 
 void CCharacter::ChangePosition(vec2 NewPos)
@@ -1789,20 +1944,7 @@ void CCharacter::ChangePosition(vec2 NewPos)
 	GS()->CreatePlayerSpawn(NewPos);
 	m_Core.m_Pos = NewPos;
 	m_Pos = NewPos;
-	ResetDoorHit();
 	ResetHook();
-}
-
-void CCharacter::HandleDoorHit()
-{
-	const float dotProduct = dot(m_Core.m_Vel, m_NormalDoorHit);
-	m_Core.m_Vel -= m_NormalDoorHit * dotProduct;
-
-	if(dot(m_Core.m_Pos - m_OlderPos, m_NormalDoorHit) > 0)
-		m_Core.m_Pos -= m_NormalDoorHit * dot(m_Core.m_Pos - m_OlderPos, m_NormalDoorHit);
-
-	if(m_Core.m_Jumped >= 2)
-		m_Core.m_Jumped = 1;
 }
 
 bool CCharacter::StartConversation(CPlayerBot* pTarget) const
@@ -1810,11 +1952,33 @@ bool CCharacter::StartConversation(CPlayerBot* pTarget) const
 	if(m_pPlayer->IsBot() || !pTarget)
 		return false;
 
-	if(pTarget && pTarget->IsConversational() && pTarget->IsActiveForClient(m_pPlayer->GetCID()))
+	if(pTarget && pTarget->IsConversational() && pTarget->IsActiveForClient(m_pPlayer->GetCID()) != ESnappingPriority::None)
 	{
 		m_pPlayer->m_Dialog.Start(pTarget->GetCID());
 		return true;
 	}
 
 	return false;
+}
+
+void CCharacter::TryActivateChainLightning(int ByItemId, std::optional<int> DamageOpt)
+{
+	if(!m_Alive || m_LastRingChainLightningAttack > Server()->Tick() || !CItemDescription::Data().contains(ByItemId))
+		return;
+
+	if(m_pPlayer->GetItem(ByItemId)->IsEquipped() || m_pPlayer->GetItem(itRingPerfectLightning)->IsEquipped())
+	{
+		const auto totalDamage = DamageOpt ? *DamageOpt : m_pPlayer->GetTotalAttributeValue(AttributeIdentifier::DMG);
+		const auto totalChainDamage = translate_to_percent_rest(totalDamage, 20);
+
+		new CEntityTeslaSerpent(&GS()->m_World, m_ClientID, m_Pos, random_range_pos(vec2 {}, 128.f), totalChainDamage, 500.f, 8, 0.7f);
+		m_LastRingChainLightningAttack = Server()->Tick() + CalculateChainLightningCooldown();
+	}
+}
+
+int CCharacter::CalculateChainLightningCooldown() const
+{
+	if(m_pPlayer->GetItem(itRingPerfectLightning)->IsEquipped())
+		return (1 + rand() % 2) * Server()->TickSpeed();
+	return (1 + rand() % 6) * Server()->TickSpeed();
 }

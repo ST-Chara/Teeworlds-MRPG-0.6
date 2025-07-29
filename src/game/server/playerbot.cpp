@@ -4,9 +4,10 @@
 #include "gamecontext.h"
 
 #include "entities/character_bot.h"
-#include "worldmodes/dungeon.h"
+#include "worldmodes/dungeon/dungeon.h"
 
 #include "core/components/Bots/BotManager.h"
+#include "core/tools/scenario_player_manager.h"
 #include "core/tools/path_finder.h"
 
 MACRO_ALLOC_POOL_ID_IMPL(CPlayerBot, MAX_CLIENTS* ENGINE_MAX_WORLDS + MAX_CLIENTS)
@@ -26,13 +27,19 @@ CPlayerBot::~CPlayerBot()
 	std::memset(DataBotInfo::ms_aDataBot[m_BotID].m_aActiveByQuest, 0, MAX_PLAYERS * sizeof(bool));
 }
 
-void CPlayerBot::InitQuestBotMobInfo(CQuestBotMobInfo elem)
+void CPlayerBot::InitQuestBotMobInfo(const CQuestBotMobInfo& elem)
 {
 	if(m_BotType == TYPE_BOT_QUEST_MOB)
 	{
 		m_QuestMobInfo = elem;
 		std::memset(m_QuestMobInfo.m_ActiveForClient, 0, MAX_PLAYERS * sizeof(bool));
 	}
+}
+
+void CPlayerBot::InitBotMobInfo(const MobBotInfo& elem)
+{
+	if(m_BotType == TYPE_BOT_MOB)
+		m_MobInfo = elem;
 }
 
 void CPlayerBot::InitBasicStats(int StartHP, int StartMP, int MaxHP, int MaxMP)
@@ -55,7 +62,6 @@ void CPlayerBot::Tick()
 				if(pOwner && pOwner->GetCharacter() && distance(pOwner->GetCharacter()->GetPos(), m_ViewPos) > 1000.f)
 				{
 					vec2 OwnerPos = pOwner->GetCharacter()->GetPos();
-					m_pCharacter->ResetDoorHit();
 					m_pCharacter->ChangePosition(OwnerPos);
 
 					m_pCharacter->m_Core.m_Vel = pOwner->GetCharacter()->m_Core.m_Vel;
@@ -80,16 +86,12 @@ void CPlayerBot::Tick()
 	{
 		TryRespawn();
 	}
-
-	// update events
-	m_Scenarios.Tick();
 }
 
 void CPlayerBot::PostTick()
 {
 	HandleTuningParams();
 	m_Effects.PostTick();
-	m_Scenarios.PostTick();
 }
 
 CPlayer* CPlayerBot::GetEidolonOwner() const
@@ -140,7 +142,7 @@ void CPlayerBot::PrepareRespawnTick()
 	if(m_BotType == TYPE_BOT_MOB)
 	{
 		m_DisabledBotDamage = false;
-		m_aPlayerTick[Respawn] = Server()->Tick() + Server()->TickSpeed() * MobBotInfo::ms_aMobBot[m_MobID].m_RespawnTick;
+		m_aPlayerTick[Respawn] = Server()->Tick() + Server()->TickSpeed() * m_MobInfo.m_RespawnTick;
 	}
 	else if(m_BotType == TYPE_BOT_QUEST_MOB)
 	{
@@ -172,83 +174,95 @@ void CPlayerBot::PrepareRespawnTick()
 	m_WantSpawn = true;
 }
 
-int CPlayerBot::GetTotalAttributeValue(AttributeIdentifier ID) const
+static int CalculateAttribute(CGS* pGS, const CPlayerBot* pPlayer, AttributeIdentifier ID, int PowerLevel, bool Boss)
 {
-	auto CalculateAttribute = [ID, this](int Power, bool Boss) -> int
+	const auto* pAttribute = pGS->GetAttributeInfo(ID);
+	if(!pAttribute)
+		return 0;
+
+	int AttributeValue = 0;
+
+	// from equipment
+	for(unsigned i = 0; i < (unsigned)ItemType::NUM_EQUIPPED; i++)
 	{
-		// get stats from the bot's equipment
-		int AttributeValue = Power;
-		for(unsigned i = 0; i < (unsigned)ItemType::NUM_EQUIPPED; i++)
+		if(const auto ItemID = pPlayer->GetEquippedSlotItemID((ItemType)i))
+			AttributeValue += pGS->GetItemInfo(ItemID.value())->GetEnchantAttributeValue(ID);
+	}
+
+	// is dungeon world
+	if(pGS->IsWorldType(WorldType::Dungeon))
+	{
+		const auto* pController = dynamic_cast<CGameControllerDungeon*>(pGS->m_pController);
+		if(pController && pController->GetDungeon())
 		{
-			if(const auto ItemID = GetEquippedItemID((ItemType)i))
+			// calculating stats
+			int MinValue = 0;
+			float BaseFactor = 0.f;
+			if(pAttribute->IsGroup(AttributeGroup::DamageType))
 			{
-				AttributeValue += GS()->GetItemInfo(ItemID.value())->GetInfoEnchantStats(ID);
+				BaseFactor = (float)g_Config.m_SvDunFactDmg / 100.f;
 			}
+			else if(ID == AttributeIdentifier::Crit)
+			{
+				BaseFactor = (float)g_Config.m_SvDunFactCrit / 100.f;
+			}
+			else if(Boss && ID == AttributeIdentifier::HP)
+			{
+				BaseFactor = (float)g_Config.m_SvDunFactBossHp / 100.0f;
+				MinValue = 5;
+			}
+			else
+			{
+				BaseFactor = (float)g_Config.m_SvDunFactOther / 100.f;
+				MinValue = 5;
+			}
+
+			AttributeValue += pController->CalculateMobAttribute(ID, PowerLevel, BaseFactor, MinValue);
 		}
 
-		// sync power mobs
-		float Percent = 100.0f;
-		const auto* pAttribute = GS()->GetAttributeInfo(ID);
+		return AttributeValue;
+	}
 
-		if(pAttribute->IsGroup(AttributeGroup::DamageType))
-		{
-			Percent = 5.0f;
-		}
-		else if(pAttribute->IsGroup(AttributeGroup::Dps))
-		{
-			Percent = 15.0f;
-		}
-		else if(pAttribute->IsGroup(AttributeGroup::Healer))
-		{
-			Percent = 20.0f;
-		}
+	// default
+	float Percent = 100.0f;
+	if(pAttribute->IsGroup(AttributeGroup::DamageType))
+		Percent = 5.0f;
+	else if(pAttribute->IsGroup(AttributeGroup::Dps))
+		Percent = 15.0f;
+	else if(pAttribute->IsGroup(AttributeGroup::Healer))
+		Percent = 20.0f;
 
-		// downcast for unhardness boss
-		if(Boss && ID != AttributeIdentifier::HP)
-		{
-			Percent /= 10.0f;
-		}
+	// downcast for unhardness boss
+	if(Boss && ID != AttributeIdentifier::HP)
+		Percent /= 10.0f;
 
-		const int SyncPercentSize = maximum(1, translate_to_percent_rest(AttributeValue, Percent));
-		return SyncPercentSize;
-	};
+	const int SyncPercentSize = maximum(1, translate_to_percent_rest(AttributeValue + PowerLevel, Percent));
+	return SyncPercentSize;
+}
 
+int CPlayerBot::GetTotalRawAttributeValue(AttributeIdentifier ID) const
+{
+	int AttributeValue = 10;
 
-	// initiallize attributeValue by bot type
-	int AttributeValue;
 	if(m_BotType == TYPE_BOT_EIDOLON)
 	{
-		if(GS()->IsWorldType(WorldType::Dungeon))
-		{
-			const int SyncFactor = dynamic_cast<CGameControllerDungeon*>(GS()->m_pController)->GetSyncFactor();
-			AttributeValue = CalculateAttribute(translate_to_percent_rest(maximum(1, SyncFactor), 5), false);
-		}
-		else
-		{
-			const auto* pOwner = GetEidolonOwner();
-			AttributeValue = CalculateAttribute(pOwner ? pOwner->GetTotalAttributeValue(AttributeIdentifier::EidolonPWR) : 0, false);
-		}
+		const auto* pOwner = GetEidolonOwner();
+		AttributeValue = CalculateAttribute(GS(), this, ID, pOwner->GetTotalAttributeValue(AttributeIdentifier::EidolonPWR), false);
 	}
 	else if(m_BotType == TYPE_BOT_MOB)
 	{
-		const int PowerMob = MobBotInfo::ms_aMobBot[m_MobID].m_Power;
-		const bool IsBoss = MobBotInfo::ms_aMobBot[m_MobID].m_Boss;
-
-		AttributeValue = CalculateAttribute(PowerMob, IsBoss);
+		const int PowerMob = m_MobInfo.m_Power;
+		const bool IsBoss = m_MobInfo.m_Boss;
+		AttributeValue = CalculateAttribute(GS(), this, ID, PowerMob, IsBoss);
 	}
 	else if(m_BotType == TYPE_BOT_QUEST_MOB)
 	{
 		const int PowerQuestMob = m_QuestMobInfo.m_AttributePower;
-
-		AttributeValue = CalculateAttribute(PowerQuestMob, true);
+		AttributeValue = CalculateAttribute(GS(), this, ID, PowerQuestMob, true);
 	}
 	else if(m_BotType == TYPE_BOT_NPC)
 	{
-		AttributeValue = CalculateAttribute(10, true);
-	}
-	else
-	{
-		AttributeValue = 10;
+		AttributeValue = CalculateAttribute(GS(), this, ID, 10, false);
 	}
 
 	return AttributeValue;
@@ -264,8 +278,8 @@ void CPlayerBot::TryRespawn()
 	if(m_BotType == TYPE_BOT_MOB)
 	{
 		vec2 SpawnPos;
-		const auto RespawnPosition = MobBotInfo::ms_aMobBot[m_MobID].m_Position;
-		const auto Radius = MobBotInfo::ms_aMobBot[m_MobID].m_Radius;
+		const auto RespawnPosition = m_MobInfo.m_Position;
+		const auto Radius = m_MobInfo.m_Radius;
 
 		if(GS()->m_pController->CanSpawn(m_BotType, &SpawnPos, std::make_pair(RespawnPosition, Radius)))
 			FinalSpawnPos = SpawnPos;
@@ -284,11 +298,14 @@ void CPlayerBot::TryRespawn()
 		if(!pOwner || !pOwner->GetCharacter())
 			return;
 
-		auto* pOwnerItem = pOwner->GetItem(pOwner->GetEquippedItemID(ItemType::EquipEidolon).value());
-		if(pOwnerItem->GetDurability() <= 0)
-			return;
+		if(auto EquippedItemIdOpt = pOwner->GetEquippedSlotItemID(ItemType::EquipEidolon))
+		{
+			auto* pOwnerItem = pOwner->GetItem(pOwner->GetEquippedSlotItemID(ItemType::EquipEidolon).value());
+			if(pOwnerItem->GetDurability() <= 0)
+				return;
 
-		FinalSpawnPos = pOwner->GetCharacter()->GetPos();
+			FinalSpawnPos = pOwner->GetCharacter()->GetPos();
+		}
 	}
 	else if(m_BotType == TYPE_BOT_QUEST_MOB)
 	{
@@ -310,7 +327,7 @@ int64_t CPlayerBot::GetMaskVisibleForClients() const
 	int64_t Mask = 0;
 	for(int i = 0; i < MAX_PLAYERS; i++)
 	{
-		if(IsActiveForClient(i))
+		if(IsActiveForClient(i) != ESnappingPriority::None)
 			Mask |= CmaskOne(i);
 	}
 
@@ -321,22 +338,22 @@ ESnappingPriority CPlayerBot::IsActiveForClient(int ClientID) const
 {
 	CPlayer* pSnappingPlayer = GS()->GetPlayer(ClientID);
 	if(ClientID < 0 || ClientID >= MAX_PLAYERS || !pSnappingPlayer)
-		return SNAPPING_PRIORITY_NONE;
+		return ESnappingPriority::None;
 
 	if(m_BotType == TYPE_BOT_QUEST)
 	{
 		// is quest not accept
 		const auto QuestID = QuestBotInfo::ms_aQuestBot[m_MobID].m_QuestID;
 		if(pSnappingPlayer->GetQuest(QuestID)->GetState() != QuestState::Accepted)
-			return SNAPPING_PRIORITY_NONE;
+			return ESnappingPriority::None;
 
 		// is step pos not equal current step pos
 		if((QuestBotInfo::ms_aQuestBot[m_MobID].m_StepPos != pSnappingPlayer->GetQuest(QuestID)->GetStepPos()))
-			return SNAPPING_PRIORITY_NONE;
+			return ESnappingPriority::None;
 
 		// is step pos completed
 		if(pSnappingPlayer->GetQuest(QuestID)->GetStepByMob(GetBotMobID())->m_StepComplete)
-			return SNAPPING_PRIORITY_NONE;
+			return ESnappingPriority::None;
 	}
 
 	if(m_BotType == TYPE_BOT_NPC)
@@ -345,20 +362,20 @@ ESnappingPriority CPlayerBot::IsActiveForClient(int ClientID) const
 
 		// always show guardian and nurse
 		if(FunctionNPC == FUNCTION_NPC_GUARDIAN || FunctionNPC == FUNCTION_NPC_NURSE)
-			return SNAPPING_PRIORITY_HIGH;
+			return ESnappingPriority::High;
 
 		// does not show npc what active by quest
 		const auto ActiveByQuest = DataBotInfo::ms_aDataBot[m_BotID].m_aActiveByQuest[ClientID];
 		if(ActiveByQuest)
-			return SNAPPING_PRIORITY_NONE;
+			return ESnappingPriority::None;
 
 		// is active or finished quest show only character
 		const int GivesQuest = GS()->Core()->BotManager()->GetQuestNPC(m_MobID);
 		if(FunctionNPC == FUNCTION_NPC_GIVE_QUEST && pSnappingPlayer->GetQuest(GivesQuest)->GetState() != QuestState::NoAccepted)
-			return SNAPPING_PRIORITY_LOWER;
+			return ESnappingPriority::Lower;
 	}
 
-	return SNAPPING_PRIORITY_HIGH;
+	return ESnappingPriority::High;
 }
 
 void CPlayerBot::HandleTuningParams()
@@ -379,7 +396,7 @@ void CPlayerBot::Snap(int SnappingClient)
 		return;
 
 	// Check if the game is active or if it is active for the snapping client
-	if(!IsActive() || !IsActiveForClient(SnappingClient))
+	if(!IsActive() || IsActiveForClient(SnappingClient) == ESnappingPriority::None)
 		return;
 
 	CNetObj_ClientInfo* pClientInfo = static_cast<CNetObj_ClientInfo*>(Server()->SnapNewItem(NETOBJTYPE_CLIENTINFO, ID, sizeof(CNetObj_ClientInfo)));
@@ -393,7 +410,7 @@ void CPlayerBot::Snap(int SnappingClient)
 	{
 		const float Progress = translate_to_percent((float)GetMaxHealth(), (float)GetHealth());
 
-		std::string ProgressBar = mystd::string::progressBar(100, (int)Progress, 33, "\u25B0", "\u25B1");
+		std::string ProgressBar = mystd::string::progressBar(100, (int)Progress, 3, "\u25B0", "\u25B1");
 		StrToInts(&pClientInfo->m_Clan0, 3, ProgressBar.c_str());
 	}
 	else
@@ -458,7 +475,7 @@ Mood CPlayerBot::GetMoodState() const
 
 int CPlayerBot::GetLevel() const
 {
-	return (m_BotType == TYPE_BOT_MOB ? MobBotInfo::ms_aMobBot[m_MobID].m_Level : 1);
+	return (m_BotType == TYPE_BOT_MOB ? m_MobInfo.m_Level : 1);
 }
 
 void CPlayerBot::GetFormatedName(char* aBuffer, int BufferSize)
@@ -474,7 +491,7 @@ void CPlayerBot::GetFormatedName(char* aBuffer, int BufferSize)
 	}
 }
 
-std::optional<int> CPlayerBot::GetEquippedItemID(ItemType EquipID, int SkipItemID) const
+std::optional<int> CPlayerBot::GetEquippedSlotItemID(ItemType EquipID) const
 {
 	auto& DataBot = DataBotInfo::ms_aDataBot[m_BotID];
 	if(DataBot.m_vEquippedSlot.contains(EquipID))
@@ -488,7 +505,7 @@ std::optional<int> CPlayerBot::GetEquippedItemID(ItemType EquipID, int SkipItemI
 
 const char* CPlayerBot::GetStatus() const
 {
-	if(m_BotType == TYPE_BOT_MOB && MobBotInfo::ms_aMobBot[m_MobID].m_Boss)
+	if(m_BotType == TYPE_BOT_MOB && m_MobInfo.m_Boss)
 	{
 		return GS()->IsWorldType(WorldType::Dungeon) ? "Boss" : "Raid";
 	}
@@ -518,7 +535,7 @@ int CPlayerBot::GetCurrentWorldID() const
 {
 	switch(m_BotType)
 	{
-		case TYPE_BOT_MOB: return MobBotInfo::ms_aMobBot[m_MobID].m_WorldID;
+		case TYPE_BOT_MOB: return m_MobInfo.m_WorldID;
 		case TYPE_BOT_QUEST_MOB: return m_QuestMobInfo.m_WorldID;
 		case TYPE_BOT_NPC: return NpcBotInfo::ms_aNpcBot[m_MobID].m_WorldID;
 		case TYPE_BOT_EIDOLON: return Server()->GetClientWorldID(m_MobID);

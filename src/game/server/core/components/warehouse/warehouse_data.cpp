@@ -1,167 +1,236 @@
-/* (c) Magnus Auvinen. See licence.txt in the root of the distribution for more information. */
-/* If you are missing that file, acquire a complete release at teeworlds.com.                */
 #include "warehouse_data.h"
 
-#include <game/server/entity_manager.h>
 #include <game/server/gamecontext.h>
-#include <game/server/core/components/Inventory/InventoryManager.h>
+#include <game/server/entity_manager.h>
+#include <game/server/core/components/inventory/inventory_manager.h>
+#include <sstream>
 
-void CWarehouse::Init(const std::string& Name, const DBSet& Type, const std::string& Data, vec2 Pos, int Currency, int WorldID)
+const std::string CWarehouse::s_DefaultSubgroupKey = "Uncategorized";
+
+void CWarehouse::Init(const std::string& Name, const DBSet& Type, const std::string& TradesStr,
+	const nlohmann::json& StorageData, vec2 Pos, int Currency, int WorldID)
 {
 	m_Flags = WF_NONE;
 	m_Name = Name;
 	m_Pos = Pos;
 	m_Currency = Currency;
 	m_WorldID = WorldID;
-
-	InitJsonData(Type, Data);
+	m_Storage.Init(this);
+	InitData(Type, TradesStr, StorageData);
 }
 
-void CWarehouse::InitJsonData(const DBSet& Type, const std::string& Data)
+void CWarehouse::InitializeFlags(const DBSet& Type)
 {
-	// check properties exist
-	dbg_assert(!Data.empty(), "The data json string is empty");
-
-
-	// initialize type flags
+	m_Flags = WF_NONE;
 	if(Type.hasSet("buying"))
 		m_Flags |= WF_BUY;
-	else if(Type.hasSet("selling"))
+	if(Type.hasSet("selling"))
 		m_Flags |= WF_SELL;
-
-
-	// initialize other flags
 	if(Type.hasSet("storage"))
 		m_Flags |= WF_STORAGE;
+}
 
-
-	// parse properties
-	mystd::json::parse(Data, [this](nlohmann::json& pJson)
+void CWarehouse::ParseCollectionBlock(const std::string& block_content, const std::string& currentGroup, const std::string& currentSubgroup)
+{
+	// check parent
+	const auto openParen = block_content.find('(');
+	const auto closeParen = block_content.rfind(')');
+	if(openParen == std::string::npos || closeParen == std::string::npos || closeParen <= openParen)
 	{
-		// initialize trade list
-		if(m_Flags & (WF_BUY | WF_SELL))
+		dbg_msg("warehouse_parser", "Warehouse(%d): Malformed COLLECTION block: missing '()' or invalid format. Content: '%s'", m_ID, block_content.c_str());
+		return;
+	}
+
+	// sub params
+	const auto paramsStr = mystd::string::trim(block_content.substr(openParen + 1, closeParen - openParen - 1));
+	const auto colonPos = paramsStr.find(':');
+	if(colonPos == std::string::npos)
+	{
+		dbg_msg("warehouse_parser", "Warehouse(%d): Malformed COLLECTION parameters: missing ':'. Expected GroupName:TypeName. Content: '%s'", m_ID, paramsStr.c_str());
+		return;
+	}
+
+	// initialize by group type collection
+	const auto groupNameStr = mystd::string::trim(paramsStr.substr(0, colonPos));
+	const auto groupPrep = GetItemGroupFromDBSet(DBSet(groupNameStr));
+	const auto groupOpt = (groupPrep != ItemGroup::Unknown ? std::make_optional<ItemGroup>(groupPrep) : std::nullopt);
+	const auto typeNameStr = mystd::string::trim(paramsStr.substr(colonPos + 1));
+	const auto typePrep = GetItemTypeFromDBSet(DBSet(typeNameStr));
+	const auto typeOpt = (typePrep != ItemType::Unknown ? std::make_optional<ItemType>(typePrep) : std::nullopt);
+
+	auto vItemIDs = CInventoryManager::GetItemsCollection(groupOpt, typeOpt);
+	for(const int ItemId : vItemIDs)
+	{
+		CItem item(ItemId, 1, 0);
+		if(item.IsValid() && item.Info() && item.Info()->GetInitialPrice() > 0)
 		{
-			// by collections
-			if(pJson.contains("items_collections"))
-			{
-				for(const auto& pItem : pJson["items_collections"])
-				{
-					const auto dbSetGroup = DBSet(pItem.value("group", ""));
-					const auto dbSetType = DBSet(pItem.value("type", ""));
-					const auto groupOpt = GetItemGroupFromDBSet(dbSetGroup);
-					const auto typeOpt = GetItemTypeFromDBSet(dbSetType);
-					auto vItems = CInventoryManager::GetItemsCollection(groupOpt, typeOpt);
+			CTrade& newTrade = m_vTradingList.emplace_back(m_vTradingList.size(), std::move(item), item.Info()->GetInitialPrice(), -1);
+			m_GroupedTrades.add_item(currentGroup, currentSubgroup, &newTrade);
+		}
+	}
+}
 
-					// adding all item's from collection to trade list
-					for(const int ItemID : vItems)
-					{
-						auto Item = CItem(ItemID, 1, 0);
-						const auto HasInitialPrice = Item.Info()->GetInitialPrice() > 0;
+void CWarehouse::ParseItemBlock(const std::string& ItemEntryString, const std::string& currentGroup, const std::string& currentSubgroup)
+{
+	const auto slashPos = ItemEntryString.find('/');
+	const auto openParenPos = ItemEntryString.find('(');
+	const auto closeParenPos = ItemEntryString.rfind(')');
 
-						if(Item.IsValid() && HasInitialPrice)
-						{
-							m_vTradingList.emplace_back(m_vTradingList.size(), std::move(Item), Item.Info()->GetInitialPrice());
-						}
-					}
-				}
-			}
+	if(slashPos == std::string::npos || openParenPos == std::string::npos || closeParenPos == std::string::npos ||
+		openParenPos <= slashPos || closeParenPos <= openParenPos)
+	{
+		dbg_msg("warehouse_parser", "Warehouse(%d): Malformed ITEM block. Content: '%s'. Expected ItemID/Value(Price[/Products])", m_ID, ItemEntryString.c_str());
+		return;
+	}
 
-			// by item's
-			if(pJson.contains("items"))
-			{
-				for(const auto& pItem : pJson["items"])
-				{
-					const auto ItemID = pItem.value("id", -1);
-					const auto Value = pItem.value("value", 1);
-					const auto Enchant = pItem.value("enchant", 0);
-					const auto Price = pItem.value("price", 0);
-					auto Item = CItem(ItemID, Value, Enchant);
+	try
+	{
+		const int itemId = std::stoi(mystd::string::trim(ItemEntryString.substr(0, slashPos)));
+		const int itemValue = std::stoi(mystd::string::trim(ItemEntryString.substr(slashPos + 1, openParenPos - (slashPos + 1))));
+		const auto priceProdStr = mystd::string::trim(ItemEntryString.substr(openParenPos + 1, closeParenPos - (openParenPos + 1)));
+		const auto priceSlashPos = priceProdStr.find('/');
 
-					// adding item to trading list
-					if(Item.IsValid() && Price > 0)
-					{
-						m_vTradingList.emplace_back(m_vTradingList.size(), std::move(Item), Price);
-					}
-				}
-			}
+		int priceVal;
+		int productsVal = -1;
+		if(priceSlashPos != std::string::npos)
+		{
+			priceVal = std::stoi(mystd::string::trim(priceProdStr.substr(0, priceSlashPos)));
+			productsVal = std::stoi(mystd::string::trim(priceProdStr.substr(priceSlashPos + 1)));
+		}
+		else
+		{
+			priceVal = std::stoi(priceProdStr);
 		}
 
-
-		// initialize storage
-		if(m_Flags & WF_STORAGE)
+		CItem item(itemId, itemValue, 0);
+		if(item.IsValid() && priceVal > 0)
 		{
-			// check storage properties value
-			dbg_assert(pJson.contains("storage"), "The warehouse is flagged as storage, but no storage data provided");
-
-			// initialize storage
-			const auto JsonStorage = pJson["storage"];
-			m_Storage.m_Value = JsonStorage.value("value", BigInt(0));
-			m_Storage.m_TextPos = JsonStorage.value("position", vec2());
-			m_Storage.m_pWarehouse = this;
+			CTrade& newTrade = m_vTradingList.emplace_back(m_vTradingList.size(), std::move(item), priceVal, productsVal);
+			m_GroupedTrades.add_item(currentGroup, currentSubgroup, &newTrade);
 		}
+	}
+	catch(const std::invalid_argument& ia)
+	{
+		dbg_msg("warehouse_parser", "Warehouse(%d): Invalid number in ITEM parameters: %s. Content: '%s'", m_ID, ia.what(), ItemEntryString.c_str());
+	}
+	catch(const std::out_of_range& oor)
+	{
+		dbg_msg("warehouse_parser", "Warehouse(%d): Number out of range in ITEM parameters: %s. Content: '%s'", m_ID, oor.what(), ItemEntryString.c_str());
+	}
+}
 
-		// sorting by group and price
-		std::ranges::sort(m_vTradingList, [](const CTrade& a, const CTrade& b)
+void CWarehouse::InitData(const DBSet& Type, const std::string& ItemsString, const nlohmann::json& StorageData)
+{
+	InitializeFlags(Type);
+	m_vTradingList.clear();
+	m_GroupedTrades.clear();
+
+	if(!(m_Flags & (WF_BUY | WF_SELL)) || ItemsString.empty())
+	{
+		InitializeStorage(StorageData);
+		dbg_msg("warehouse", "'%s' (ID: %d) initialized. No trade items defined or flags not set for trading.", m_Name.c_str(), m_ID);
+		return;
+	}
+
+	// initialize variables
+	std::string currentParsingGroup = "Uncategorized";
+	std::string currentParsingSubgroup = m_GroupedTrades.get_default_subgroup_key();
+	int lineNumber = 0;
+	std::string line;
+
+	// parsing string lines
+	std::istringstream iss(ItemsString);
+	while(std::getline(iss, line))
+	{
+		lineNumber++;
+		const auto trimmedLine = mystd::string::trim(line);
+
+		if(trimmedLine.empty() || trimmedLine[0] == '#')
+			continue;
+
+		if(trimmedLine[0] == '*')
 		{
-			const auto aPrice = a.GetItem()->Info()->GetInitialPrice();
-			const auto bPrice = b.GetItem()->Info()->GetInitialPrice();
+			const auto groupLineContent = mystd::string::trim(trimmedLine.substr(1));
+			auto [parsedGroup, parsedSubgroup] = mystd::string::split_by_delimiter(groupLineContent, ':');
+			if(!parsedGroup.empty())
+				currentParsingGroup = parsedGroup;
 
-			if(aPrice != bPrice)
+			currentParsingSubgroup = parsedSubgroup.empty() ? m_GroupedTrades.get_default_subgroup_key() : parsedSubgroup;
+		}
+		else if(trimmedLine[0] == '[' && trimmedLine.back() == ']')
+		{
+			const auto blockContent = mystd::string::trim(trimmedLine.substr(1, trimmedLine.length() - 2));
+			if(blockContent.empty())
 			{
-				return aPrice < bPrice;
+				dbg_msg("warehouse_parser", "L%d: Warehouse(%d): Empty block '[]' in context group '%s':'%s'. Skipping.", lineNumber, m_ID, currentParsingGroup.c_str(), currentParsingSubgroup.c_str());
+				continue;
 			}
 
-			const auto aGroup = a.GetItem()->Info()->GetGroup();
-			const auto bGroup = b.GetItem()->Info()->GetGroup();
-			if(aGroup != bGroup)
-			{
-				return aGroup < bGroup;
-			}
+			if(blockContent.rfind("COLLECTION(", 0) == 0)
+				ParseCollectionBlock(blockContent, currentParsingGroup, currentParsingSubgroup);
+			else
+				ParseItemBlock(blockContent, currentParsingGroup, currentParsingSubgroup);
+		}
+		else
+		{
+			dbg_msg("warehouse_parser", "L%d: Warehouse(%d): Unrecognized line format in context group '%s':'%s': %s", lineNumber, m_ID, currentParsingGroup.c_str(), currentParsingSubgroup.c_str(), trimmedLine.c_str());
+		}
+	}
 
-			const auto aType = a.GetItem()->Info()->GetType();
-			const auto bType = b.GetItem()->Info()->GetType();
-			return aType < bType;
-		});
+	InitializeStorage(StorageData);
 
-
-		// information about initialize
-		dbg_msg("warehouse", "'%s' initialized. (storage: '%s', type: '%s', size: '%lu')",
-			m_Name.c_str(),
-			IsHasFlag(WF_STORAGE) ? "Yes" : "No",
-			IsHasFlag(WF_BUY) ? "Buy" : "Sell",
-			m_vTradingList.size());
-
-		// save properties data for changes
-		m_Properties = std::move(pJson);
+	m_GroupedTrades.sort_all_items([](const CTrade* a, const CTrade* b)
+	{
+		const auto aPrice = a->GetPrice();
+		const auto bPrice = b->GetPrice();
+		return aPrice < bPrice;
 	});
+
+	dbg_msg("warehouse", "'%s' (ID: %d) initialized. Total Items: %zu, Groups: %zu, Currency: %d, WorldID: %d",
+		m_Name.c_str(), m_ID, m_vTradingList.size(), m_GroupedTrades.get_all_data().size(), m_Currency, m_WorldID);
+}
+
+void CWarehouse::InitializeStorage(const nlohmann::json& StorageData)
+{
+	if(!(m_Flags & WF_STORAGE) || StorageData.is_null())
+		return;
+
+	m_Storage.SetValue(StorageData.value("value", BigInt(0)));
+	m_Storage.SetTextPos(StorageData.value("position", vec2()));
 }
 
 void CWarehouse::SaveData()
 {
-	// update storage value
 	if(IsHasFlag(WF_STORAGE))
 	{
-		auto& JsonStorage = m_Properties["storage"];
-		JsonStorage["value"] = m_Storage.GetValue();
+		nlohmann::json storageJson;
+		storageJson["value"] = m_Storage.GetValue().to_string();
+		storageJson["position"] = m_Storage.GetTextPos();
+		Database->Execute<DB::UPDATE>(TW_WAREHOUSE_TABLE, "StorageData = '{}' WHERE ID = {}", storageJson.dump(), m_ID);
 	}
-
-	// save to db
-	Database->Execute<DB::UPDATE>(TW_WAREHOUSE_TABLE, "Data = '{}' WHERE ID = '{}'", m_Properties.dump().c_str(), m_ID);
 }
 
 CTrade* CWarehouse::GetTrade(int TradeID)
 {
-	const auto iter = std::ranges::find_if(m_vTradingList, [TradeID](const CTrade& Trade)
-	{
+	const auto iter = std::ranges::find_if(m_vTradingList, [TradeID](const CTrade& Trade) {
 		return Trade.GetID() == TradeID;
 	});
+	return iter != m_vTradingList.end() ? &(*iter) : nullptr;
+}
 
-	return iter != m_vTradingList.end() ? std::to_address(iter) : nullptr;
+CItemDescription* CWarehouse::GetCurrency() const
+{
+	return &CItemDescription::Data()[m_Currency];
 }
 
 void CWarehouse::CStorage::UpdateText(int LifeTime) const
 {
-	const auto* pGS = (CGS*)Instance::GameServer(m_pWarehouse->m_WorldID);
+	if(!m_pWarehouse)
+		return;
 
-	pGS->EntityManager()->Text(m_TextPos, LifeTime, m_Value.to_string().c_str());
+	const auto* pGS = (CGS*)Instance::GameServer(m_pWarehouse->GetWorldID());
+	if(!pGS) return;
+
+	if(m_TextPos.x != 0 || m_TextPos.y != 0)
+		pGS->EntityManager()->Text(m_TextPos, LifeTime, m_Value.to_string().c_str());
 }

@@ -22,28 +22,19 @@ public:
 		ENTTYPE_LASER,
 		ENTTYPE_PICKUP,
 		ENTTYPE_CHARACTER,
-		ENTTYPE_RANDOM_BOX,
-		ENTTYPE_BONUS_DROP,
-		ENTTYPE_ITEM_DROP,
-		ENTTYPE_QUEST_DROP,
+		ENTTYPE_PICKUP_ITEM,
+		ENTTYPE_PICKUP_QUEST,
 		ENTTYPE_GATHERING_NODE,
-		ENTTYPE_MULTIPLE_ORBITE,
-		ENTTYPE_EYES,
-		ENTTYPE_EYES_WALL,
-
-		// eidolon
-		ENTTYPE_EIDOLON_ITEM,
 
 		// quest
-		ENTTYPE_MOVE_TO_POINT,
+		ENTTYPE_QUEST_OBJECTIVE,
+		ENTTYPE_DIR_NAVIGATOR,
 		ENTTYPE_PATH_NAVIGATOR,
-		ENTTYPE_PATH_FINDER,
 
 		// door's
+		ENTTYPE_DEFAULT_DOOR,
 		ENTTYPE_DUNGEON_DOOR,
-		ENTTYPE_DUNGEON_PROGRESS_DOOR,
-		ENTTYPE_HOUSE_DOOR,
-		ENTTYPE_BOT_WALL,
+		ENTTYPE_BOT_DOOR,
 
 		// by groups
 		ENTTYPE_ACTION,
@@ -60,8 +51,8 @@ public:
 private:
 	CEntity *m_pNextTraverseEntity;
 	CEntity *m_apFirstEntityTypes[NUM_ENTTYPES];
+	std::vector<bool> m_aBotsActive;
 	ska::unordered_set<int> m_aMarkedBotsActive;
-	ska::unordered_map<int, bool> m_aBotsActive;
 	ska::flat_hash_set<CEntity*> m_apEntitiesCollection;
 
 	CGS *m_pGS;
@@ -73,7 +64,6 @@ public:
 
 	ska::unordered_set<std::shared_ptr<CEntityGroup>> m_EntityGroups;
 	bool m_ResetRequested;
-	bool m_Paused;
 	CWorldCore m_Core;
 
 	CGameWorld();

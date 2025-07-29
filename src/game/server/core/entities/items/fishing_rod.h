@@ -33,7 +33,7 @@ class CEntityFishingRod : public CEntity
 		NUM_ROD_POINTS = 3,
 
 		ROPE,
-		NUM_ROPE_POINTS = 10,
+		NUM_ROPE_POINTS = 8,
 	};
 
 	vec2 m_EndRodPoint {};
@@ -42,6 +42,7 @@ class CEntityFishingRod : public CEntity
 
 public:
 	CEntityFishingRod(CGameWorld* pGameWorld, int ClientID, vec2 Position, vec2 Force);
+	~CEntityFishingRod() override;
 
 	void FishingTick(CPlayer* pPlayer, CProfession* pFisherman, GatheringNode* pNode, std::optional<int> EquippedItemID);
 	bool IsWaitingState() const { return m_Fishing.m_State == FishingNow::WAITING; }

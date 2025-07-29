@@ -5,9 +5,9 @@
 #include <engine/storage.h>
 #include <engine/map.h>
 
-#include "worldmodes/dungeon.h"
 #include "worldmodes/default.h"
 #include "worldmodes/tutorial.h"
+#include "worldmodes/dungeon/dungeon.h"
 
 #include "entity_manager.h"
 #include "core/command_processor.h"
@@ -19,10 +19,14 @@
 #include "core/components/quests/quest_manager.h"
 #include "core/components/skills/skill_manager.h"
 
+#include "core/components/duties/duties_manager.h"
+#include "core/components/accounts/account_listener.h"
 #include "core/components/achievements/achievement_listener.h"
-#include "core/components/Inventory/inventory_listener.h"
+#include "core/components/inventory/inventory_listener.h"
 #include "core/components/Eidolons/EidolonInfoData.h"
 #include "core/components/worlds/world_data.h"
+#include "core/tools/scenario_group_manager.h"
+#include "core/tools/scenario_player_manager.h"
 #include "core/tools/vote_optional.h"
 #include "core/tools/vote_wrapper.h"
 
@@ -31,12 +35,13 @@ CGS::CGS()
 	m_pEntityManager = new CEntityManager(this);
 	m_pMmoController = new CMmoController(this);
 
-	m_MultiplierExp = 0;
 	m_pStorage = nullptr;
 	m_pServer = nullptr;
 	m_pController = nullptr;
 	m_pCommandProcessor = nullptr;
 	m_pPathFinder = nullptr;
+	m_pScenarioPlayerManager = nullptr;
+	m_pScenarioGroupManager = nullptr;
 	mem_zero(m_apPlayers, sizeof(m_apPlayers));
 	mem_zero(m_aBroadcastStates, sizeof(m_aBroadcastStates));
 }
@@ -55,6 +60,8 @@ CGS::~CGS()
 	delete m_pCommandProcessor;
 	delete m_pPathFinder;
 	delete m_pEntityManager;
+	delete m_pScenarioPlayerManager;
+	delete m_pScenarioGroupManager;
 }
 
 CCharacter* CGS::GetPlayerChar(int ClientID) const
@@ -149,7 +156,7 @@ void CGS::CreateFinishEffect(vec2 Pos, int64_t Mask)
 	}
 }
 
-void CGS::CreateDamage(vec2 Pos, int FromCID, int Amount, bool CritDamage, float Angle, int64_t Mask)
+void CGS::CreateDamage(vec2 Pos, int FromCID, int Amount, float Angle, int64_t Mask)
 {
 	float a = 3 * pi / 2 + Angle;
 	float s = a - pi / 3;
@@ -164,12 +171,6 @@ void CGS::CreateDamage(vec2 Pos, int FromCID, int Amount, bool CritDamage, float
 			pEvent->m_Angle = (int)(f * 256.0f);
 		}
 	}
-
-	if(CritDamage)
-	{
-		if(CPlayer* pPlayer = GetPlayer(FromCID, true, true); pPlayer && pPlayer->GetItem(itShowCriticalDamage)->IsEquipped())
-			Chat(FromCID, ":: Crit damage: {}p.", Amount);
-	}
 }
 
 void CGS::CreateHammerHit(vec2 Pos, int64_t Mask)
@@ -181,18 +182,18 @@ void CGS::CreateHammerHit(vec2 Pos, int64_t Mask)
 	}
 }
 
-void CGS::CreateRandomRadiusExplosion(int ExplosionCount, float Radius, vec2 Pos, int Owner, int Weapon, int MaxDamage)
+void CGS::CreateRandomRadiusExplosion(int ExplosionCount, float Radius, vec2 Pos, int Owner, int Weapon, int MaxDamage, int ForceFlag)
 {
 	for(int i = 0; i < ExplosionCount; ++i)
 	{
 		const float theta = random_float(0.0f, 2.0f * pi);
 		const float Distance = sqrt(random_float()) * Radius;
 		const vec2 ExplosionPos = Pos + vec2(Distance * cos(theta), Distance * sin(theta));
-		CreateExplosion(ExplosionPos, Owner, Weapon, MaxDamage);
+		CreateExplosion(ExplosionPos, Owner, Weapon, MaxDamage, ForceFlag);
 	}
 }
 
-void CGS::CreateCyrcleExplosion(int ExplosionCount, float Radius, vec2 Pos, int Owner, int Weapon, int MaxDamage)
+void CGS::CreateCyrcleExplosion(int ExplosionCount, float Radius, vec2 Pos, int Owner, int Weapon, int MaxDamage, int ForceFlag)
 {
 	const float AngleStep = 2.0f * pi / (float)ExplosionCount;
 
@@ -200,11 +201,11 @@ void CGS::CreateCyrcleExplosion(int ExplosionCount, float Radius, vec2 Pos, int 
 	{
 		const float Angle = i * AngleStep;
 		const vec2 ExplosionPos = Pos + vec2(Radius * cos(Angle), Radius * sin(Angle));
-		CreateExplosion(ExplosionPos, Owner, Weapon, MaxDamage);
+		CreateExplosion(ExplosionPos, Owner, Weapon, MaxDamage, ForceFlag);
 	}
 }
 
-void CGS::CreateExplosion(vec2 Pos, int Owner, int Weapon, int MaxDamage)
+void CGS::CreateExplosion(vec2 Pos, int Owner, int Weapon, int MaxDamage, int ForceFlag)
 {
 	// create the explosion event
 	if(auto* pEvent = m_Events.Create<CNetEvent_Explosion>())
@@ -220,7 +221,6 @@ void CGS::CreateExplosion(vec2 Pos, int Owner, int Weapon, int MaxDamage)
 	// find entities within explosion radius
 	CCharacter* apEnts[MAX_CLIENTS];
 	const int Num = m_World.FindEntities(Pos, Radius, reinterpret_cast<CEntity**>(apEnts), MAX_CLIENTS, CGameWorld::ENTTYPE_CHARACTER);
-
 	for(int i = 0; i < Num; ++i)
 	{
 		CCharacter* pChar = apEnts[i];
@@ -238,13 +238,11 @@ void CGS::CreateExplosion(vec2 Pos, int Owner, int Weapon, int MaxDamage)
 		{
 			Strength = 0.5f;
 			if(Owner != -1 && m_apPlayers[Owner])
-			{
 				Strength = m_apPlayers[Owner]->m_NextTuningParams.m_ExplosionStrength;
-			}
 		}
 
 		// Apply damage and force
-		pChar->TakeDamage(ForceDir * (Strength * Length), Damage, Owner, Weapon);
+		pChar->TakeDamage(ForceDir * (Strength * Length), Damage, Owner, Weapon, ForceFlag);
 	}
 }
 
@@ -308,7 +306,7 @@ void CGS::CreatePlayerSound(int ClientID, int Sound)
 	}
 }
 
-void CGS::SnapLaser(int SnappingClient, int ID, const vec2& To, const vec2& From, int StartTick, int LaserType, int Subtype, int Owner, int Flags) const
+void CGS::SnapLaser(int SnappingClient, int ID, const vec2& To, const vec2& From, int StartTick, int LaserType, int Subtype, int Owner, int Flags, int SwitchNumber) const
 {
 	if(GetClientVersion(SnappingClient) >= VERSION_DDNET_MULTI_LASER)
 	{
@@ -321,11 +319,12 @@ void CGS::SnapLaser(int SnappingClient, int ID, const vec2& To, const vec2& From
 		pObj->m_FromX = (int)From.x;
 		pObj->m_FromY = (int)From.y;
 		pObj->m_StartTick = StartTick;
-		pObj->m_Owner = Owner;
+		pObj->m_Owner = Owner < (int)MAX_PLAYERS - 1 ? Owner : -1;
 		pObj->m_Type = LaserType;
 		pObj->m_Subtype = Subtype;
-		pObj->m_SwitchNumber = 0;
+		pObj->m_SwitchNumber = SwitchNumber;
 		pObj->m_Flags = Flags;
+		pObj->m_Flags |= LASERFLAG_NO_PREDICT;
 	}
 	else
 	{
@@ -341,7 +340,7 @@ void CGS::SnapLaser(int SnappingClient, int ID, const vec2& To, const vec2& From
 	}
 }
 
-void CGS::SnapPickup(int SnappingClient, int ID, const vec2& Pos, int Type, int SubType) const
+void CGS::SnapPickup(int SnappingClient, int ID, const vec2& Pos, int Type, int SubType, int Flags) const
 {
 	if(GetClientVersion(SnappingClient) >= VERSION_DDNET_ENTITY_NETOBJS)
 	{
@@ -354,6 +353,8 @@ void CGS::SnapPickup(int SnappingClient, int ID, const vec2& Pos, int Type, int 
 		pPickup->m_Type = Type;
 		pPickup->m_Subtype = SubType;
 		pPickup->m_SwitchNumber = 0;
+		pPickup->m_Flags = Flags;
+		pPickup->m_Flags |= PICKUPFLAG_NO_PREDICT;
 	}
 	else
 	{
@@ -389,7 +390,7 @@ void CGS::SnapProjectile(int SnappingClient, int ID, const vec2& Pos, const vec2
 		pProj->m_VelY = round_to_int(Vel.y);
 		pProj->m_Type = Type;
 		pProj->m_StartTick = StartTick;
-		pProj->m_Owner = Owner;
+		pProj->m_Owner = Owner < (int)MAX_PLAYERS - 1 ? Owner : -1;
 		pProj->m_Flags = Flags;
 		pProj->m_SwitchNumber = 0;
 		pProj->m_TuneZone = 0;
@@ -438,11 +439,15 @@ void CGS::SendChatTarget(int ClientID, const char* pText) const
 void CGS::SendChat(int ChatterClientID, int Mode, const char* pText, int64_t Mask)
 {
 	if(ChatterClientID >= 0 && ChatterClientID < MAX_CLIENTS)
-		Console()->PrintF(IConsole::OUTPUT_LEVEL_ADDINFO, Mode == CHAT_TEAM ? "teamchat" : "chat",
+	{
+		Console()->PrintFormat(IConsole::OUTPUT_LEVEL_STANDARD, Mode == CHAT_TEAM ? "teamchat" : "chat",
 			"%d:%d:%s: %s", ChatterClientID, Mode, Server()->ClientName(ChatterClientID), pText);
+	}
 	else
-		Console()->PrintF(IConsole::OUTPUT_LEVEL_ADDINFO, Mode == CHAT_TEAM ? "teamchat" : "chat",
+	{
+		Console()->PrintFormat(IConsole::OUTPUT_LEVEL_STANDARD, Mode == CHAT_TEAM ? "teamchat" : "chat",
 			"*** %s", pText);
+	}
 
 	CNetMsg_Sv_Chat Msg;
 	Msg.m_Team = 0;
@@ -546,8 +551,7 @@ void CGS::BroadcastTick(int ClientID)
 			if(Broadcast.m_TimedPriority < BroadcastPriority::MainInformation)
 			{
 				// Format the broadcast message with basic player stats and append pAppend
-				const char* pAppend = m_apPlayers[ClientID]->m_PlayerFlags & PLAYERFLAG_CHATTING ? "\0" : Broadcast.m_NextMessage;
-				m_apPlayers[ClientID]->FormatBroadcastBasicStats(Broadcast.m_aCompleteMsg, sizeof(Broadcast.m_aCompleteMsg), pAppend);
+				m_apPlayers[ClientID]->FormatBroadcastBasicStats(Broadcast.m_aCompleteMsg, sizeof(Broadcast.m_aCompleteMsg), Broadcast.m_NextMessage);
 			}
 			else
 			{
@@ -633,7 +637,7 @@ void CGS::SendTuningParams(int ClientID)
 /* #########################################################################
 	ENGINE GAMECONTEXT
 ######################################################################### */
-void CGS::HandleNicknameChange(CPlayer* pPlayer, const char* pNewNickname) const
+void CGS::ProcessNicknameChange(CPlayer* pPlayer, const char* pNewNickname) const
 {
 	if(!pPlayer)
 		return;
@@ -650,22 +654,30 @@ void CGS::HandleNicknameChange(CPlayer* pPlayer, const char* pNewNickname) const
 		std::string NewName = pNewNickname;
 		auto fnCallback = [NewName](CPlayer* pPlayer, bool Accepted)
 		{
-			CGS* pGS = pPlayer->GS();
+			auto* pGS = pPlayer->GS();
 			const int ClientID = pPlayer->GetCID();
 			if(Accepted)
 			{
 				if(pGS->Core()->AccountManager()->ChangeNickname(NewName, ClientID))
+				{
 					pGS->Chat(ClientID, "Your nickname has been successfully updated.");
+				}
 				else
+				{
 					pGS->Chat(ClientID, "This nickname is already in use.");
+				}
 			}
 			else
+			{
 				pGS->Chat(ClientID, "You need to set a '{}' nickname. This window will keep appearing until you confirm the nickname change.", Instance::Server()->ClientName(ClientID));
+			}
 		};
+
 		auto closeCondition = [NewName](CPlayer* pPlayer)
 		{
 			return str_comp(NewName.c_str(), pPlayer->GS()->Server()->ClientName(pPlayer->GetCID())) == 0;
 		};
+
 		const auto pOption = CVoteOptional::Create(ClientID, 10, "Nick {}?", NewName.c_str());
 		pOption->RegisterCallback(fnCallback);
 		pOption->RegisterCloseCondition(closeCondition);
@@ -686,6 +698,7 @@ void CGS::OnInit(int WorldID)
 		Server()->SnapSetStaticsize(i, m_NetObjHandler.GetObjSize(i));
 
 	// initialize listeners
+	g_AccountListener.Initialize();
 	g_AchievementListener.Initialize();
 	g_InventoryListener.Initialize();
 
@@ -709,6 +722,8 @@ void CGS::OnInit(int WorldID)
 	// initialize
 	m_pCommandProcessor = new CCommandProcessor(this);
 	m_pPathFinder = new CPathFinder(&m_Collision);
+	m_pScenarioPlayerManager = new CScenarioPlayerManager(this);
+	m_pScenarioGroupManager = new CScenarioGroupManager(this);
 }
 
 void CGS::OnConsoleInit()
@@ -726,13 +741,16 @@ void CGS::OnDaytypeChange(int NewDaytype)
 	switch(NewDaytype)
 	{
 		case NIGHT_TYPE:
-			UpdateExpMultiplier();
-			ChatWorld(m_WorldID, "", "Nighttime adventure in the '{}' zone has been boosted by {}%!", pWorldname, m_MultiplierExp);
+			UpdateWorldMultipliers();
+			ChatWorld(m_WorldID, "", "Night has fallen in '{}'!", pWorldname);
+			BroadcastWorld(m_WorldID, BroadcastPriority::VeryImportant, 200, "Rates: Exp {}% | Gold {}%", m_Multipliers.Experience, m_Multipliers.Gold);
 			break;
-		default:
-			ResetExpMultiplier();
-			ChatWorld(m_WorldID, "", "The exp multiplier in the '{}' zone is 100%.", pWorldname);
+		case MORNING_TYPE:
+			ResetWorldMultipliers();
+			ChatWorld(m_WorldID, "", "The sun rises over '{}'!", pWorldname);
+			BroadcastWorld(m_WorldID, BroadcastPriority::VeryImportant, 200, "Rates: Exp {}% | Gold {}%", m_Multipliers.Experience, m_Multipliers.Gold);
 			break;
+		default: break;
 	}
 }
 
@@ -742,47 +760,41 @@ void CGS::OnTick()
 	m_World.Tick();
 	m_pController->Tick();
 
-	// player updates on tick
-	for(int i = 0; i < MAX_CLIENTS; i++)
+	for(int ClientID = 0; ClientID < MAX_CLIENTS; ++ClientID)
 	{
-		if(!Server()->ClientIngame(i) || !m_apPlayers[i] || m_apPlayers[i]->GetCurrentWorldID() != m_WorldID)
+		if(!Server()->ClientIngame(ClientID))
 			continue;
 
-		if(m_apPlayers[i]->IsMarkedForDestroy())
+		auto* pPlayer = m_apPlayers[ClientID];
+		if(!pPlayer || pPlayer->GetCurrentWorldID() != m_WorldID)
+			continue;
+
+		if(pPlayer->IsMarkedForDestroy())
 		{
-			DestroyPlayer(i);
+			DestroyPlayer(ClientID);
 			continue;
 		}
 
-		m_apPlayers[i]->Tick();
-		m_apPlayers[i]->PostTick();
-		if(i < MAX_PLAYERS)
-		{
-			BroadcastTick(i);
-		}
+		pPlayer->Tick();
+		pPlayer->PostTick();
+		ScenarioPlayerManager()->UpdateClientScenarios(ClientID);
+
+		if(ClientID < MAX_PLAYERS)
+			BroadcastTick(ClientID);
 	}
 
 	Core()->OnTick();
 	UpdateCollisionZones();
+	ScenarioGroupManager()->UpdateScenarios();
 }
 
 void CGS::OnTickGlobal()
 {
-	// update player time period
-	if(Server()->Tick() % (Server()->TickSpeed() * g_Config.m_SvPlayerPeriodCheckInterval) == 0)
-	{
-		for(int i = 0; i < MAX_PLAYERS; ++i)
-		{
-			if(CPlayer* pPlayer = GetPlayer(i, true))
-				Core()->OnHandlePlayerTimePeriod(pPlayer);
-		}
-	}
-
 	// send chat messages with interval
 	if(Server()->Tick() % (Server()->TickSpeed() * g_Config.m_SvChatMessageInterval) == 0)
 	{
 		static const std::deque<std::string> vMessages = {
-			"[INFO] We recommend that you use the function in F1 console \"ui_close_window_after_changing_setting 1\", this will allow the voting menu not to close after clicking to vote.",
+			"[INFO] We recommend that you use the function in F1 console \"ui_close_window_after_changing_setting 0\", this will allow the voting menu not to close after clicking to vote.",
 			"[INFO] If you can't see the dialogs with NPCs, check in F1 console \"cl_motd_time\" so that the value is set.",
 			"[INFO] Information and data can be found in the call voting menu.",
 			"[INFO] The mod supports translation, you can find it in \"Call vote -> Settings -> Settings language\".",
@@ -795,10 +807,23 @@ void CGS::OnTickGlobal()
 	// send top messages with interval
 	if(Server()->Tick() % (Server()->TickSpeed() * g_Config.m_SvChatTopMessageInterval) == 0)
 	{
-		ToplistType RandomType = (ToplistType)(rand() % (int)ToplistType::NUM_TOPLIST_TYPES);
+		const auto RandomType = (ToplistType)(rand() % (int)ToplistType::NUM_TOPLIST_TYPES);
 		auto vResult = Core()->GetTopList(RandomType, 2);
 		if(vResult.size() < 2)
 			return;
+
+		if(RandomType == ToplistType::PlayerExpert)
+		{
+			Chat(-1, "-- {}", "Top Specialists in the Realm");
+			for(auto& [Iter, Top] : vResult)
+			{
+				const auto* pNickname = Server()->GetAccountNickname(Top.Data["AccountID"].to_int());
+				const auto Value = Top.Data["Level"].to_int();
+				Chat(-1, "{}: '{-} - {}LV'.", Top.Name, pNickname, Value);
+			}
+
+			return;
+		}
 
 		auto& Leader = vResult[1];
 		auto& Second = vResult[2];
@@ -858,7 +883,7 @@ void CGS::OnMessage(int MsgID, CUnpacker* pUnpacker, int ClientID)
 	{
 		if(g_Config.m_Debug)
 		{
-			Console()->PrintF(IConsole::OUTPUT_LEVEL_DEBUG, "server",
+			Console()->PrintFormat(IConsole::OUTPUT_LEVEL_DEBUG, "server",
 				"dropped weird message '%s' (%d), failed on '%s'", m_NetObjHandler.GetMsgName(MsgID), MsgID, m_NetObjHandler.FailedMsgOn());
 		}
 
@@ -897,6 +922,7 @@ void CGS::OnMessage(int MsgID, CUnpacker* pUnpacker, int ClientID)
 				SendChat(ClientID, pMsg->m_Team ? CHAT_TEAM : CHAT_ALL, pMsg->m_pMessage);
 
 			// set last message
+			g_EventListenerManager.Notify<IEventListener::PlayerChat>(pPlayer, pMsg->m_pMessage);
 			str_copy(pPlayer->m_aLastMsg, pMsg->m_pMessage, sizeof(pPlayer->m_aLastMsg));
 			return;
 		}
@@ -916,7 +942,7 @@ void CGS::OnMessage(int MsgID, CUnpacker* pUnpacker, int ClientID)
 				pPlayer->m_VotesData.ApplyVoteUpdaterData();
 				if(CVoteOption* pActionVote = VoteWrapper::GetOptionVoteByAction(ClientID, pMsg->m_pValue))
 				{
-					const int ReasonNumber = clamp(str_toint(pMsg->m_pReason), 1, 100000);
+					const int ReasonNumber = clamp(str_toint(pMsg->m_pReason), 1, 1000000000);
 					if(pActionVote->m_Callback.m_Impl)
 						pActionVote->m_Callback.m_Impl(pPlayer, ReasonNumber, pMsg->m_pReason, pActionVote->m_Callback.m_pData);
 					else
@@ -953,6 +979,49 @@ void CGS::OnMessage(int MsgID, CUnpacker* pUnpacker, int ClientID)
 
 		if(MsgID == NETMSGTYPE_CL_SETSPECTATORMODE)
 		{
+			// allow input from spectator mode
+			if(pPlayer->GetTeam() != TEAM_SPECTATORS)
+			{
+				if(pPlayer->GetCharacter())
+				{
+					pPlayer->GetCharacter()->m_Input.m_Fire++;
+					pPlayer->GetCharacter()->m_LatestInput.m_Fire++;
+				}
+
+				Server()->Input()->AppendEventKeyClick(ClientID, KEY_EVENT_FIRE);
+				return;
+			}
+
+			// update spec spectator mode
+			const auto pMsg = (CNetMsg_Cl_SetSpectatorMode*)pRawMsg;
+			int SpectatorID = clamp(pMsg->m_SpectatorId, (int)SPEC_FOLLOW, MAX_CLIENTS - 1);
+			if(SpectatorID >= 0 && !Server()->ReverseTranslate(SpectatorID, ClientID))
+				return;
+
+			auto& LastSetSpecSpectatorMode = pPlayer->m_aPlayerTick[LastSetSpectatorMode];
+			if(LastSetSpecSpectatorMode && LastSetSpecSpectatorMode + Server()->TickSpeed() / 4 > Server()->Tick())
+				return;
+
+			LastSetSpecSpectatorMode = Server()->Tick();
+			if(SpectatorID >= 0)
+			{
+				if(!m_apPlayers[SpectatorID] || m_apPlayers[SpectatorID]->GetTeam() == TEAM_SPECTATORS)
+				{
+					Chat(ClientID, "Invalid spectator id used");
+					return;
+				}
+
+				const auto playerSpecWorldId = m_apPlayers[SpectatorID]->GetCurrentWorldID();
+				const auto currentWorldId = pPlayer->GetCurrentWorldID();
+				if(playerSpecWorldId != currentWorldId)
+				{
+					Server()->SetSpectatorID(ClientID, SpectatorID);
+					pPlayer->ChangeWorld(playerSpecWorldId);
+					return;
+				}
+			}
+
+			Server()->SetSpectatorID(ClientID, SpectatorID);
 			return;
 		}
 
@@ -966,7 +1035,7 @@ void CGS::OnMessage(int MsgID, CUnpacker* pUnpacker, int ClientID)
 			if(!str_utf8_check(pMsg->m_pClan) || !str_utf8_check(pMsg->m_pSkin))
 				return;
 
-			HandleNicknameChange(pPlayer, pMsg->m_pName);
+			ProcessNicknameChange(pPlayer, pMsg->m_pName);
 			Server()->SetClientClan(ClientID, pMsg->m_pClan);
 			Server()->SetClientCountry(ClientID, pMsg->m_Country);
 
@@ -1049,19 +1118,16 @@ void CGS::OnMessage(int MsgID, CUnpacker* pUnpacker, int ClientID)
 
 		if(MsgID == NETMSGTYPE_CL_SHOWOTHERSLEGACY)
 		{
-			dbg_msg("msg", "msg show others legacy cid '%d'", ClientID);
 			return;
 		}
 
 		if(MsgID == NETMSGTYPE_CL_SHOWOTHERS)
 		{
-			dbg_msg("msg", "msg show others cid '%d'", ClientID);
 			return;
 		}
 
 		if(MsgID == NETMSGTYPE_CL_SHOWDISTANCE)
 		{
-			dbg_msg("msg", "msg show distance cid '%d'", ClientID);
 			return;
 		}
 
@@ -1149,7 +1215,7 @@ void CGS::OnClientConnected(int ClientID)
 	m_aBroadcastStates[ClientID] = {};
 }
 
-void CGS::OnClientEnter(int ClientID)
+void CGS::OnClientEnter(int ClientID, bool FirstEnter)
 {
 	CPlayer* pPlayer = m_apPlayers[ClientID];
 	if(!pPlayer || pPlayer->IsBot())
@@ -1158,35 +1224,61 @@ void CGS::OnClientEnter(int ClientID)
 	m_pController->OnPlayerConnect(pPlayer);
 	m_pCommandProcessor->SendClientCommandsInfo(this, ClientID);
 
-	if(!pPlayer->IsAuthed())
+	if(FirstEnter)
 	{
 		Chat(-1, "'{}' entered and joined the {}", Server()->ClientName(ClientID), g_Config.m_SvGamemodeName);
 		CMmoController::AsyncClientEnterMsgInfo(Server()->ClientName(ClientID), ClientID);
 		return;
 	}
 
-	Chat(ClientID, "Welcome to '{}'! Zone multiplier exp is at '{}%'.", Server()->GetWorldName(m_WorldID), m_MultiplierExp);
+	Chat(ClientID, "Welcome to '{}'!", Server()->GetWorldName(m_WorldID));
 	Core()->AccountManager()->LoadAccount(pPlayer, false);
 	Core()->SaveAccount(m_apPlayers[ClientID], SAVE_POSITION);
 }
 
 void CGS::OnClientDrop(int ClientID, const char* pReason)
 {
-	if(!m_apPlayers[ClientID] || m_apPlayers[ClientID]->IsBot())
-		return;
+	// remove client from scenarios
+	ScenarioPlayerManager()->RemoveClient(ClientID);
+	ScenarioGroupManager()->RemoveClient(ClientID);
 
-	// update clients on drop
-	m_pController->OnPlayerDisconnect(m_apPlayers[ClientID]);
-
-	if((Server()->ClientIngame(ClientID) || Server()->IsClientChangingWorld(ClientID)) && IsPlayerInWorld(ClientID))
+	// check valid player
+	auto*& pPlayer = m_apPlayers[ClientID];
+	if(pPlayer && !pPlayer->IsBot())
 	{
-		Chat(-1, "'{}' has left the {}", Server()->ClientName(ClientID), g_Config.m_SvGamemodeName);
-		Console()->PrintF(IConsole::OUTPUT_LEVEL_STANDARD, "game", "leave player='%d:%s'", ClientID, Server()->ClientName(ClientID));
-		Core()->SaveAccount(m_apPlayers[ClientID], SAVE_POSITION);
-	}
+		// information
+		if((Server()->ClientIngame(ClientID) || Server()->IsClientChangingWorld(ClientID)) && IsPlayerInWorld(ClientID))
+		{
+			// messages & rage left
+			const auto* pChar = pPlayer->GetCharacter();
+			if(pChar && pChar->GetLastPlayerAttacker(3))
+			{
+				if(HasWorldFlag(WORLD_FLAG_RATING_SYSTEM))
+				{
+					Chat(-1, "'{}' rage left {} and lost {} rating points!", Server()->ClientName(ClientID),
+						g_Config.m_SvGamemodeName, g_Config.m_SvRageQuitDecreaseRating);
+					pPlayer->Account()->GetRatingSystem().DecreaseRating(g_Config.m_SvRageQuitDecreaseRating);
+				}
+				else
+					Chat(-1, "'{}' rage left the {}", Server()->ClientName(ClientID), g_Config.m_SvGamemodeName);
+			}
+			else
+			{
+				Chat(-1, "'{}' has left the {}", Server()->ClientName(ClientID), g_Config.m_SvGamemodeName);
+				Console()->PrintFormat(IConsole::OUTPUT_LEVEL_STANDARD, "game", "leave player='%d:%s'", ClientID, Server()->ClientName(ClientID));
+			}
 
-	delete m_apPlayers[ClientID];
-	m_apPlayers[ClientID] = nullptr;
+			// save player position
+			Core()->SaveAccount(m_apPlayers[ClientID], SAVE_POSITION);
+		}
+
+		// update clients on drop
+		m_pController->OnPlayerDisconnect(pPlayer);
+
+		// delete player
+		delete pPlayer;
+		pPlayer = nullptr;
+	}
 }
 
 void CGS::OnClientDirectInput(int ClientID, void* pInput)
@@ -1235,6 +1327,11 @@ void CGS::OnUpdateClientServerInfo(nlohmann::json* pJson, int ClientID)
 
 void CGS::OnClientPrepareChangeWorld(int ClientID)
 {
+	// remove client from scenarios
+	ScenarioPlayerManager()->RemoveClient(ClientID);
+	ScenarioGroupManager()->RemoveClient(ClientID);
+
+	// prepare and delete player
 	if(m_apPlayers[ClientID])
 	{
 		m_apPlayers[ClientID]->KillCharacter(WEAPON_WORLD);
@@ -1242,8 +1339,10 @@ void CGS::OnClientPrepareChangeWorld(int ClientID)
 		m_apPlayers[ClientID] = nullptr;
 	}
 
+	// allocate new player
 	const int AllocMemoryCell = ClientID + m_WorldID * MAX_CLIENTS;
 	m_apPlayers[ClientID] = new(AllocMemoryCell) CPlayer(this, ClientID);
+	Core()->QuestManager()->Update(m_apPlayers[ClientID]);
 }
 
 bool CGS::IsClientReady(int ClientID) const
@@ -1317,20 +1416,26 @@ bool CGS::SendMenuMotd(CPlayer* pPlayer, int Menulist) const
 	return pPlayer ? Core()->OnSendMenuMotd(pPlayer, Menulist) : false;
 }
 
-void CGS::UpdateExpMultiplier()
+void CGS::UpdateWorldMultipliers()
 {
 	if(IsWorldType(WorldType::Dungeon))
 	{
-		m_MultiplierExp = g_Config.m_SvRaidDungeonExpMultiplier;
+		m_Multipliers.Experience = g_Config.m_SvDungeonExpMultiplier;
+		m_Multipliers.Gold = g_Config.m_SvDungeonGoldMultiplier;
 		return;
 	}
 
-	m_MultiplierExp = (100 + maximum(20, rand() % 200));
+	m_Multipliers.Experience = (100 + maximum(20, rand() % 200));
+	m_Multipliers.Gold = (100 + maximum(20, rand() % 100));
 }
 
-void CGS::ResetExpMultiplier()
+void CGS::ResetWorldMultipliers()
 {
-	m_MultiplierExp = 100;
+	if(IsWorldType(WorldType::Dungeon))
+		return;
+
+	m_Multipliers.Experience = 100;
+	m_Multipliers.Gold = 100;
 }
 
 void CGS::UpdateVotesIfForAll(int MenuList) const
@@ -1393,20 +1498,26 @@ bool CGS::DestroyPlayer(int ClientID)
 	return true;
 }
 
-int CGS::CreateBot(short BotType, int BotID, int SubID)
+CPlayerBot* CGS::CreateBot(short BotType, int BotID, int SubID)
 {
-	int BotClientID = MAX_PLAYERS;
-	while(m_apPlayers[BotClientID])
+	int BotClientID = -1;
+	for(int i = MAX_PLAYERS; i < MAX_CLIENTS; i++)
 	{
-		BotClientID++;
-		if(BotClientID >= MAX_CLIENTS)
-			return -1;
+		if(!m_apPlayers[i])
+		{
+			BotClientID = i;
+			break;
+		}
 	}
+
+	if(BotClientID == -1)
+		return nullptr;
 
 	Server()->InitClientBot(BotClientID);
 	const int AllocMemoryCell = BotClientID + m_WorldID * MAX_CLIENTS;
-	m_apPlayers[BotClientID] = new(AllocMemoryCell) CPlayerBot(this, BotClientID, BotID, SubID, BotType);
-	return BotClientID;
+	CPlayerBot* pBot = new(AllocMemoryCell) CPlayerBot(this, BotClientID, BotID, SubID, BotType);
+	m_apPlayers[BotClientID] = pBot;
+	return pBot;
 }
 
 bool CGS::TakeItemCharacter(int ClientID)
@@ -1416,7 +1527,7 @@ bool CGS::TakeItemCharacter(int ClientID)
 		return false;
 
 	std::vector<CEntityDropItem*> vDrops;
-	for(CEntity* item : m_World.FindEntities(pPlayer->GetCharacter()->m_Core.m_Pos, 24, 64, CGameWorld::ENTTYPE_ITEM_DROP))
+	for(CEntity* item : m_World.FindEntities(pPlayer->GetCharacter()->m_Core.m_Pos, 24, 64, CGameWorld::ENTTYPE_PICKUP_ITEM))
 		vDrops.push_back((CEntityDropItem*)item);
 
 	for(const auto& pDrop : vDrops)
@@ -1432,6 +1543,11 @@ bool CGS::IsWorldType(WorldType Type) const
 	return Server()->IsWorldType(m_WorldID, Type);
 }
 
+bool CGS::HasWorldFlag(int64_t Flag) const
+{
+	return Server()->GetWorldDetail(m_WorldID)->HasFlag(Flag);
+}
+
 void CGS::InitWorld()
 {
 	const auto pWorldDetail = Server()->GetWorldDetail(m_WorldID);
@@ -1442,27 +1558,31 @@ void CGS::InitWorld()
 	switch(worldType)
 	{
 		case WorldType::Dungeon:
-			m_pController = new CGameControllerDungeon(this);
+		{
+			auto* pDungeon = Core()->DutiesManager()->GetDungeonByWorldID(m_WorldID);
+			dbg_assert(pDungeon != nullptr, "can't create dungeon without dungeon context");
+			m_pController = new CGameControllerDungeon(this, pDungeon);
 			worldTypeStr = "Dungeon";
-			m_AllowedPVP = false;
 			break;
-
+		}
 		case WorldType::Tutorial:
+		{
 			m_pController = new CGameControllerTutorial(this);
 			worldTypeStr = "Tutorial";
-			m_AllowedPVP = false;
 			break;
-
+		}
 		default:
+		{
 			m_pController = new CGameControllerDefault(this);
 			worldTypeStr = "Default";
-			m_AllowedPVP = true;
 			break;
+		}
 	}
 
 	// initialize controller and update game state
-	UpdateExpMultiplier();
+	UpdateWorldMultipliers();
 	m_pController->OnInit();
+	m_AllowedPVP = pWorldDetail->HasFlag(WORLD_FLAG_ALLOWED_PVP);
 
 	// Log world initialization details
 	const char* pStrStatePvp = m_AllowedPVP ? "yes" : "no";
@@ -1471,13 +1591,26 @@ void CGS::InitWorld()
 		worldTypeStr.data(), pStrStatePvp);
 }
 
-bool CGS::IsPlayerInWorld(int ClientID, int WorldID) const
+bool CGS::IsDutyStarted() const
+{
+	const auto typeWorld = Server()->GetWorldDetail(m_WorldID)->GetType();
+
+	if(typeWorld == WorldType::Dungeon)
+	{
+		auto pController = dynamic_cast<CGameControllerDungeon*>(m_pController);
+		return pController && pController->GetDungeon()->GetState() >= CDungeonData::STATE_STARTED;
+	}
+
+	return false;
+}
+
+bool CGS::IsPlayerInWorld(int ClientID, std::optional<int> WorldIdOpt) const
 {
 	if(ClientID < 0 || ClientID >= MAX_CLIENTS || !m_apPlayers[ClientID])
 		return false;
 
 	int PlayerWorldID = m_apPlayers[ClientID]->GetCurrentWorldID();
-	return PlayerWorldID == (WorldID == -1 ? m_WorldID : WorldID);
+	return PlayerWorldID == (WorldIdOpt ? *WorldIdOpt : m_WorldID);
 }
 
 bool CGS::ArePlayersNearby(vec2 Pos, float Distance) const

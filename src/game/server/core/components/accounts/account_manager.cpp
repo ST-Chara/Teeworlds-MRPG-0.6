@@ -5,235 +5,40 @@
 #include <base/hash_ctxt.h>
 #include <game/server/gamecontext.h>
 
-#include <game/server/core/components/Inventory/InventoryManager.h>
+#include <game/server/core/components/inventory/inventory_manager.h>
 #include <game/server/core/components/mails/mailbox_manager.h>
 #include <game/server/core/components/worlds/world_data.h>
 
 #include <teeother/components/localization.h>
 
-int CAccountManager::GetLastVisitedWorldID(CPlayer* pPlayer) const
+constexpr int LENGTH_LOGPASS_MAX = 12;
+constexpr int LENGTH_LOGPASS_MIN = 4;
+constexpr int LENGTH_PIN_MAX = 6;
+constexpr int LENGTH_PIN_MIN = 4;
+
+void CAccountManager::OnPlayerLogin(CPlayer* pPlayer)
 {
-	const auto pWorldIterator = std::ranges::find_if(pPlayer->Account()->m_aHistoryWorld, [&](int WorldID)
-	{
-		if(GS()->GetWorldData(WorldID))
-		{
-			int RequiredLevel = GS()->GetWorldData(WorldID)->GetRequiredLevel();
-			return Server()->IsWorldType(WorldID, WorldType::Default) && pPlayer->Account()->GetLevel() >= RequiredLevel;
-		}
-		return false;
-	});
-	return pWorldIterator != pPlayer->Account()->m_aHistoryWorld.end() ? *pWorldIterator : MAIN_WORLD_ID;
-}
-
-// Register an account for a client with the given parameters
-AccountCodeResult CAccountManager::RegisterAccount(int ClientID, const char* Login, const char* Password)
-{
-	// Check if the length of the login and password is between 4 and 12 characters
-	if(str_length(Login) > 12 || str_length(Login) < 4 || str_length(Password) > 12 || str_length(Password) < 4)
-	{
-		GS()->Chat(ClientID, "The username and password must each contain '4 - 12 characters'.");
-		return AccountCodeResult::AOP_MISMATCH_LENGTH_SYMBOLS; // Return mismatch length symbols error
-	}
-
-	// Get the client's clear nickname
-	const CSqlString<32> cClearNick = CSqlString<32>(Server()->ClientName(ClientID));
-
-	// Check if the client's nickname is already registered
-	ResultPtr pRes = Database->Execute<DB::SELECT>("ID", "tw_accounts_data", "WHERE Nick = '{}'", cClearNick.cstr());
-	if(pRes->next())
-	{
-		GS()->Chat(ClientID, "Sorry, but that game nickname is already taken by another player. To regain access, reach out to the support team or alter your nickname.");
-		GS()->Chat(ClientID, "Discord: \"{}\".", g_Config.m_SvDiscordInviteLink);
-		return AccountCodeResult::AOP_NICKNAME_ALREADY_EXIST; // Return nickname already exists error
-	}
-
-	// Get the highest ID from the tw_accounts table
-	ResultPtr pResID = Database->Execute<DB::SELECT>("ID", "tw_accounts", "ORDER BY ID DESC LIMIT 1");
-	const int InitID = pResID->next() ? pResID->getInt("ID") + 1 : 1; // Get the next available ID
-
-	// Convert the login and password to CSqlString objects
-	const CSqlString<32> cClearLogin = CSqlString<32>(Login);
-	const CSqlString<32> cClearPass = CSqlString<32>(Password);
-
-	// Get and store the client's IP address
-	char aAddrStr[64];
-	Server()->GetClientAddr(ClientID, aAddrStr, sizeof(aAddrStr));
-
-	// Generate a random password salt
-	char aSalt[32] = { 0 };
-	secure_random_password(aSalt, sizeof(aSalt), 24);
-
-	// Insert the account into the tw_accounts table with the values
-	Database->Execute<DB::INSERT>("tw_accounts", "(ID, Username, Password, PasswordSalt, RegisterDate, RegisteredIP) VALUES ('{}', '{}', '{}', '{}', UTC_TIMESTAMP(), '{}')", InitID, cClearLogin.cstr(), HashPassword(cClearPass.cstr(), aSalt).c_str(), aSalt, aAddrStr);
-	// Insert the account into the tw_accounts_data table with the ID and nickname values
-	Database->Execute<DB::INSERT, 100>("tw_accounts_data", "(ID, Nick) VALUES ('{}', '{}')", InitID, cClearNick.cstr());
-
-	Server()->UpdateAccountBase(InitID, cClearNick.cstr(), g_Config.m_SvMinRating);
-	GS()->Chat(ClientID, "- Registration complete! Don't forget to save your data.");
-	GS()->Chat(ClientID, "# Your nickname is a unique identifier.");
-	GS()->Chat(ClientID, "# Log in: \"/login {} {}\"", cClearLogin.cstr(), cClearPass.cstr());
-	return AccountCodeResult::AOP_REGISTER_OK; // Return registration success
-}
-
-AccountCodeResult CAccountManager::LoginAccount(int ClientID, const char* pLogin, const char* pPassword)
-{
-	// check valid player
-	CPlayer* pPlayer = GS()->GetPlayer(ClientID, false);
-	if(!pPlayer)
-	{
-		return AccountCodeResult::AOP_UNKNOWN;
-	}
-
-	// check valid login and password
-	const int LengthLogin = str_length(pLogin);
-	const int LengthPassword = str_length(pPassword);
-	if(LengthLogin < 4 || LengthLogin > 12 || LengthPassword < 4 || LengthPassword > 12)
-	{
-		GS()->Chat(ClientID, "The username and password must each contain 4 - 12 characters.");
-		return AccountCodeResult::AOP_MISMATCH_LENGTH_SYMBOLS;
-	}
-
-	// initialize sql string
-	const auto sqlStrLogin = CSqlString<32>(pLogin);
-	const auto sqlStrPass = CSqlString<32>(pPassword);
-	const auto sqlStrNick = CSqlString<32>(Server()->ClientName(ClientID));
-
-	// check if the account exists
-	ResultPtr pResAccount = Database->Execute<DB::SELECT>("*", "tw_accounts_data", "WHERE Nick = '{}'", sqlStrNick.cstr());
-	if(!pResAccount->next())
-	{
-		GS()->Chat(ClientID, "Sorry, we couldn't locate your username in our system.");
-		return AccountCodeResult::AOP_NICKNAME_NOT_EXIST;
-	}
-	int AccountID = pResAccount->getInt("ID");
-
-	// check is login and password correct
-	ResultPtr pResCheck = Database->Execute<DB::SELECT>("ID, LoginDate, Language, Password, PasswordSalt",
-		"tw_accounts", "WHERE Username = '{}' AND ID = '{}'", sqlStrLogin.cstr(), AccountID);
-	if(!pResCheck->next() || str_comp(pResCheck->getString("Password").c_str(), HashPassword(sqlStrPass.cstr(), pResCheck->getString("PasswordSalt").c_str()).c_str()) != 0)
-	{
-		GS()->Chat(ClientID, "Oops, that doesn't seem to be the right login or password");
-		return AccountCodeResult::AOP_LOGIN_WRONG;
-	}
-
-	// check if the account is banned
-	ResultPtr pResBan = Database->Execute<DB::SELECT>("BannedUntil, Reason", "tw_accounts_bans", "WHERE AccountId = '{}' AND current_timestamp() < `BannedUntil`", AccountID);
-	if(pResBan->next())
-	{
-		const char* pBannedUntil = pResBan->getString("BannedUntil").c_str();
-		const char* pReason = pResBan->getString("Reason").c_str();
-		GS()->Chat(ClientID, "You account was suspended until '{}' with the reason of '{}'.", pBannedUntil, pReason);
-		return AccountCodeResult::AOP_ACCOUNT_BANNED;
-	}
-
-	// check is player ingame
-	if(GS()->GetPlayerByUserID(AccountID) != nullptr)
-	{
-		GS()->Chat(ClientID, "The account is already in the game.");
-		return AccountCodeResult::AOP_ALREADY_IN_GAME;
-	}
-
-	// Update player account information from the database
-	const auto Language = pResCheck->getString("Language");
-	const auto LoginDate = pResCheck->getString("LoginDate");
-	pPlayer->Account()->Init(AccountID, ClientID, sqlStrLogin.cstr(), Language, LoginDate, std::move(pResAccount));
-
-	// Send success messages to the client
-	GS()->Chat(ClientID, "- Welcome! You've successfully logged in!");
-	GS()->m_pController->DoTeamChange(pPlayer);
-	LoadAccount(pPlayer, true);
-	return AccountCodeResult::AOP_LOGIN_OK;
-}
-
-void CAccountManager::LoadAccount(CPlayer* pPlayer, bool FirstInitilize)
-{
-	if(!pPlayer || !pPlayer->IsAuthed() || !GS()->IsPlayerInWorld(pPlayer->GetCID()))
+	if(!pPlayer || !pPlayer->Account())
 		return;
 
-	// Update account context pointer
+	// select first random profession by system
 	auto* pAccount = pPlayer->Account();
-
-	// Broadcast a message to the player with their current location
-	const int ClientID = pPlayer->GetCID();
-	GS()->Broadcast(ClientID, BroadcastPriority::VeryImportant, 200, "You are currently positioned at {}({})!",
-		Server()->GetWorldName(GS()->GetWorldID()), (GS()->IsAllowedPVP() ? "PVE/PVP" : "PVE"));
-
-	// Check if it is not the first initialization
-	if(!FirstInitilize)
+	if(pAccount->GetActiveProfessionID() == ProfessionIdentifier::None)
 	{
-		const int Letters = Core()->MailboxManager()->GetMailCount(pAccount->GetID());
-		if(Letters > 0)
-		{
-			GS()->Chat(ClientID, "You have '{} unread letters'.", Letters);
-		}
-
-		pAccount->GetBonusManager().SendInfoAboutActiveBonuses();
-		pPlayer->m_VotesData.UpdateVotes(MENU_MAIN);
-		return;
+		ChanceProcessor<ProfessionIdentifier> process;
+		process.addElement(ProfessionIdentifier::Tank, 100.f);
+		process.addElement(ProfessionIdentifier::Healer, 100.f);
+		process.addElement(ProfessionIdentifier::Dps, 100.f);
+		process.setEqualChance(100.f);
+		process.normalizeChances();
+		pAccount->ChangeProfession(process.getRandomElement());
+		GS()->Chat(pPlayer->GetCID(), "Your profession has been chosen by the system. You can change it at any time in the voting menu.");
 	}
-
-	// on player login
-	Core()->OnPlayerLogin(pPlayer);
-
-	// initialize default item's & settings
-	auto InitSettingsItem = [pPlayer](const std::unordered_map<int, int>& pItems)
-	{
-		for(auto& [id, defaultValue] : pItems)
-		{
-			if(auto pItem = pPlayer->GetItem(id))
-			{
-				if(!pItem->HasItem())
-					pItem->Add(1, defaultValue);
-			}
-		}
-	};
-
-	InitSettingsItem(
-		{
-			{ itHammer, 1 },
-			{ itShowEquipmentDescription, 0 },
-			{ itShowCriticalDamage, 1 },
-			{ itShowQuestStarNavigator, 1 },
-			{ itShowDetailGainMessages, 0 },
-		});
-
-	// update player time periods
-	Core()->OnHandlePlayerTimePeriod(pPlayer);
-
-	// notify about rank
-	const int Rank = Server()->GetAccountRank(pAccount->GetID());
-	GS()->Chat(-1, "'{}' logged to account. Rank '#{}[{}]' ({})", Server()->ClientName(ClientID), Rank,
-		Server()->ClientCountryIsoCode(ClientID), pPlayer->Account()->GetRatingSystem().GetRankName());
-
-	// Change player's world ID to the latest correct world ID
-	const int LatestCorrectWorldID = GetLastVisitedWorldID(pPlayer);
-	if(LatestCorrectWorldID != GS()->GetWorldID())
-	{
-		pPlayer->ChangeWorld(LatestCorrectWorldID);
-		return;
-	}
-}
-
-bool CAccountManager::ChangeNickname(const std::string& newNickname, int ClientID) const
-{
-	CPlayer* pPlayer = GS()->GetPlayer(ClientID, true);
-	if(!pPlayer)
-		return false;
-
-	// check newnickname
-	const CSqlString<32> cClearNick = CSqlString<32>(newNickname.c_str());
-	ResultPtr pRes = Database->Execute<DB::SELECT>("ID", "tw_accounts_data", "WHERE Nick = '{}'", cClearNick.cstr());
-	if(pRes->next())
-		return false;
-
-	Database->Execute<DB::UPDATE>("tw_accounts_data", "Nick = '{}' WHERE ID = '{}'", cClearNick.cstr(), pPlayer->Account()->GetID());
-	Server()->SetClientName(ClientID, newNickname.c_str());
-	return true;
 }
 
 void CAccountManager::OnClientReset(int ClientID)
 {
-	CAccountTempData::ms_aPlayerTempData.erase(ClientID);
+	CAccountSharedData::ms_aPlayerSharedData.erase(ClientID);
 	CAccountData::ms_aData.erase(ClientID);
 }
 
@@ -252,12 +57,12 @@ void CAccountManager::AddMenuProfessionUpgrades(CPlayer* pPlayer, CProfession* p
 		{
 			const auto* pAttribute = GS()->GetAttributeInfo(ID);
 			const int AttributeSize = pPlayer->GetTotalAttributeValue(ID);
-			const float Percent = pPlayer->GetAttributeChance(ID);
+			const auto PercentOpt = pPlayer->GetTotalAttributeChance(ID);
 
 			char aBuf[64] {};
-			if(Percent)
+			if(PercentOpt)
 			{
-				str_format(aBuf, sizeof(aBuf), "(%0.4f%%)", Percent);
+				str_format(aBuf, sizeof(aBuf), "(%0.4f%%)", *PercentOpt);
 			}
 			VUpgrades.Add("Total {} - {}{}", pAttribute->GetName(), AttributeSize, aBuf);
 		}
@@ -267,7 +72,7 @@ void CAccountManager::AddMenuProfessionUpgrades(CPlayer* pPlayer, CProfession* p
 		for(auto& [ID, Value] : pProf->GetAttributes())
 		{
 			const auto* pAttribute = GS()->GetAttributeInfo(ID);
-			VUpgrades.AddOption("UPGRADE", (int)ProfID, (int)ID, "Upgrade {} - {} (1 point)", pAttribute->GetName(), Value);
+			VUpgrades.AddOption("UPGRADE", (int)ProfID, (int)ID, "Upgrade {} - {} ({} point)", pAttribute->GetName(), Value, pAttribute->GetUpgradePrice());
 		}
 	}
 }
@@ -309,7 +114,7 @@ bool CAccountManager::OnSendMenuVotes(CPlayer* pPlayer, int Menulist)
 		{
 			const auto expNeed = pProfession->GetExpForNextLevel();
 			const auto progress = translate_to_percent(expNeed, pProfession->GetExperience());
-			const auto progressBar = mystd::string::progressBar(100, progress, 20, "\u25B0", "\u25B1");
+			const auto progressBar = mystd::string::progressBar(100, progress, 5, "\u25B0", "\u25B1");
 			Wrapper.MarkList().Add("{} [Lv{} {}] - {~.2}%", name.c_str(), pProfession->GetLevel(), progressBar, progress);
 		};
 
@@ -358,7 +163,17 @@ bool CAccountManager::OnSendMenuVotes(CPlayer* pPlayer, int Menulist)
 		const auto ActiveProfID = pPlayer->Account()->GetActiveProfessionID();
 
 		// select war profession
-		VoteWrapper VClassSelector(ClientID, VWF_SEPARATE_OPEN | VWF_ALIGN_TITLE | VWF_STYLE_SIMPLE, "\u2694 Change class profession");
+		VoteWrapper VClassSelector(ClientID, VWF_SEPARATE_OPEN | VWF_ALIGN_TITLE | VWF_STYLE_STRICT_BOLD, "\u2694 Change class profession");
+		VClassSelector.AddMenu(MENU_UPGRADES_ATTRIBUTES_DETAIL, "Player Attributes: Details");
+		if(const auto* pActiveProf = pPlayer->Account()->GetActiveProfession())
+		{
+			for(const auto& [ID, Percent] : pActiveProf->GetAmplifiers())
+			{
+				const auto pAttributeName = GS()->GetAttributeInfo(ID)->GetName();
+				VClassSelector.Add("Class amplifier +{~.2}% to {}", Percent, pAttributeName);
+			}
+		}
+		VClassSelector.AddLine();
 		for(const auto& Prof : pPlayer->Account()->GetProfessions())
 		{
 			if(Prof.IsProfessionType(PROFESSION_TYPE_WAR))
@@ -367,7 +182,7 @@ bool CAccountManager::OnSendMenuVotes(CPlayer* pPlayer, int Menulist)
 				const char* pProfName = GetProfessionName(Prof.GetProfessionID());
 				const auto expNeed = Prof.GetExpForNextLevel();
 				const int progress = round_to_int(translate_to_percent(expNeed, Prof.GetExperience()));
-				const auto progressBar = mystd::string::progressBar(100, progress, 20, "\u25B0", "\u25B1");
+				const auto progressBar = mystd::string::progressBar(100, progress, 5, "\u25B0", "\u25B1");
 
 				VClassSelector.AddOption("SELECT_CLASS", static_cast<int>(Prof.GetProfessionID()), "({}) {} [Lv{} {} {~.1}%] ({}P)",
 					StrActiveFlag, pProfName, Prof.GetLevel(), progressBar, progress, Prof.GetUpgradePoint());
@@ -376,7 +191,7 @@ bool CAccountManager::OnSendMenuVotes(CPlayer* pPlayer, int Menulist)
 		VoteWrapper::AddEmptyline(ClientID);
 
 		// professions
-		VoteWrapper VProfessions(ClientID, VWF_SEPARATE_OPEN | VWF_ALIGN_TITLE | VWF_STYLE_SIMPLE, "\u2696 Upgrade professions");
+		VoteWrapper VProfessions(ClientID, VWF_SEPARATE_OPEN | VWF_ALIGN_TITLE | VWF_STYLE_STRICT, "\u2696 Upgrade professions");
 		for(const auto& Prof : pPlayer->Account()->GetProfessions())
 		{
 			const auto ProfessionID = Prof.GetProfessionID();
@@ -404,6 +219,41 @@ bool CAccountManager::OnSendMenuVotes(CPlayer* pPlayer, int Menulist)
 		return true;
 	}
 
+	if(Menulist == MENU_UPGRADES_ATTRIBUTES_DETAIL)
+	{
+		pPlayer->m_VotesData.SetLastMenuID(MENU_UPGRADES);
+
+		const std::map<AttributeGroup, std::string> vMapNames =
+		{
+			{ AttributeGroup::Tank, "Tank-related" },
+			{ AttributeGroup::Dps, "Dps-related" },
+			{ AttributeGroup::Healer, "Healer-related" },
+			{ AttributeGroup::Weapon, "Weapons-related" },
+			{ AttributeGroup::DamageType, "Damage-related" },
+			{ AttributeGroup::Job, "Job-related" },
+			{ AttributeGroup::Other, "Other" }
+		};
+
+
+		VoteWrapper VSelector(ClientID, VWF_SEPARATE_OPEN | VWF_ALIGN_TITLE | VWF_STYLE_STRICT_BOLD, "Select an Attribute Group");
+		for(auto& [group, title] : vMapNames)
+		{
+			const auto groupOpt = pPlayer->m_VotesData.GetExtraID();
+			const char* pSelector = GetSelectorStringByCondition(groupOpt && (AttributeGroup)(*groupOpt) == group);
+			VSelector.AddMenu(MENU_UPGRADES_ATTRIBUTES_DETAIL, (int)group, "{}{SELECTOR}", title, pSelector);
+		}
+		VoteWrapper::AddEmptyline(ClientID);
+
+		if(const auto groupOpt = pPlayer->m_VotesData.GetExtraID())
+		{
+			const auto group = (AttributeGroup)(*groupOpt);
+			ShowPlayerAttributesByGroup(pPlayer, vMapNames.at(group), group);
+		}
+
+		VoteWrapper::AddEmptyline(ClientID);
+		VoteWrapper::AddBackpage(ClientID);
+	}
+
 	// settings
 	if(Menulist == MENU_SETTINGS)
 	{
@@ -416,7 +266,6 @@ bool CAccountManager::OnSendMenuVotes(CPlayer* pPlayer, int Menulist)
 
 		// game settings
 		VoteWrapper VMain(ClientID, VWF_OPEN, "\u2699 Main settings");
-		VMain.AddMenu(MENU_SETTINGS_TITLE, "Select personal title");
 		VMain.AddMenu(MENU_SETTINGS_LANGUAGE, "Settings language");
 		VMain.AddMenu(MENU_SETTINGS_ACCOUNT, "Settings account");
 
@@ -443,7 +292,7 @@ bool CAccountManager::OnSendMenuVotes(CPlayer* pPlayer, int Menulist)
 			if(ItemData.Info()->IsGroup(ItemGroup::Settings) && ItemData.HasItem())
 			{
 				const char* Status = ItemData.GetSettings() ? "Enabled" : "Disabled";
-				VAccount.AddOption("EQUIP_ITEM", ItemID, "[{}] {}", Status, ItemData.Info()->GetName());
+				VAccount.AddOption("TOGGLE_SETTING", ItemID, "[{}] {}", Status, ItemData.Info()->GetName());
 			}
 		}
 
@@ -465,15 +314,15 @@ bool CAccountManager::OnSendMenuVotes(CPlayer* pPlayer, int Menulist)
 		VLanguageInfo.Add("Active language: [{}]", pPlayerLanguage);
 		VoteWrapper::AddEmptyline(ClientID);
 
-		// languages TODO fix language selection
+		// languages
 		VoteWrapper VLanguages(ClientID, VWF_OPEN, "Available languages");
 		for(int i = 0; i < Server()->Localization()->m_pLanguages.size(); i++)
 		{
-			// Do not show the language that is already selected by the player in the selection lists
+			// do not show the language that is already selected by the player in the selection lists
 			if(str_comp(pPlayerLanguage, Server()->Localization()->m_pLanguages[i]->GetFilename()) == 0)
 				continue;
 
-			// Add language selection
+			// add language selection
 			const char* pLanguageName = Server()->Localization()->m_pLanguages[i]->GetName();
 			VLanguages.AddOption("SELECT_LANGUAGE", i, "Select language \"{}\"", pLanguageName);
 		}
@@ -483,53 +332,27 @@ bool CAccountManager::OnSendMenuVotes(CPlayer* pPlayer, int Menulist)
 		return true;
 	}
 
-	// title selection
-	if(Menulist == MENU_SETTINGS_TITLE)
-	{
-		pPlayer->m_VotesData.SetLastMenuID(MENU_SETTINGS);
-
-		// initialize variables
-		const auto EquippedTitleItemID = pPlayer->GetEquippedItemID(ItemType::EquipTitle);
-		const char* pCurrentTitle = EquippedTitleItemID.has_value() ? pPlayer->GetItem(EquippedTitleItemID.value())->Info()->GetName() : "title is not used";
-
-		// title information
-		VoteWrapper VInfo(ClientID, VWF_SEPARATE | VWF_ALIGN_TITLE | VWF_STYLE_SIMPLE, "Title Information");
-		VInfo.Add("Here you can set the title.");
-		VInfo.Add("Current title: {}", pCurrentTitle);
-		VoteWrapper::AddEmptyline(ClientID);
-
-		// title list
-		bool IsEmpty = true;
-		for(auto& pairItem : CPlayerItem::Data()[ClientID])
-		{
-			CPlayerItem* pPlayerItem = &pairItem.second;
-			if(pPlayerItem->Info()->IsType(ItemType::EquipTitle) && pPlayerItem->HasItem())
-			{
-				// initialize variables
-				bool IsEquipped = pPlayerItem->IsEquipped();
-
-				// add to list
-				VoteWrapper VList(ClientID, VWF_UNIQUE|VWF_STYLE_SIMPLE,"Title: {}", pPlayerItem->Info()->GetName());
-				VList.Add("{}", pPlayerItem->Info()->GetDescription());
-				if(pPlayerItem->Info()->HasAttributes())
-				{
-					VList.Add("{}", pPlayerItem->GetStringAttributesInfo(pPlayer));
-				}
-				VList.AddOption("EQUIP_ITEM", pPlayerItem->GetID(), "{} {}", IsEquipped ? "Unset" : "Set", pPlayerItem->Info()->GetName());
-				IsEmpty = false;
-			}
-		}
-		if(IsEmpty)
-		{
-			VoteWrapper(ClientID).Add("Is empty list");
-		}
-
-		// add backpage
-		VoteWrapper::AddEmptyline(ClientID);
-		VoteWrapper::AddBackpage(ClientID);
-	}
-
 	return false;
+}
+
+void CAccountManager::ShowPlayerAttributesByGroup(CPlayer* pPlayer, std::string_view Title, AttributeGroup Group) const
+{
+	const auto ClientID = pPlayer->GetCID();
+	VoteWrapper VGroup(ClientID, VWF_SEPARATE_OPEN | VWF_ALIGN_TITLE | VWF_STYLE_SIMPLE, Title.data());
+	for(auto& [ID, pInfo] : CAttributeDescription::Data())
+	{
+		if(pInfo->IsGroup(Group))
+		{
+			if(const auto PercentOpt = pPlayer->GetTotalAttributeChance(ID))
+			{
+				VGroup.Add("{}: {~.2}%", pInfo->GetName(), (*PercentOpt));
+				continue;
+			}
+
+			const int AttributeSize = pPlayer->GetTotalAttributeValue(ID);
+			VGroup.Add("{}: {}", pInfo->GetName(), AttributeSize);
+		}
+	}
 }
 
 bool CAccountManager::OnPlayerVoteCommand(CPlayer* pPlayer, const char* pCmd, const int Extra1, const int Extra2, int ReasonNumber, const char* pReason)
@@ -583,12 +406,21 @@ bool CAccountManager::OnPlayerVoteCommand(CPlayer* pPlayer, const char* pCmd, co
 	{
 		const auto ProfessionID = (ProfessionIdentifier)Extra1;
 
+		// can't change profession in dungeon
+		if(GS()->IsWorldType(WorldType::Dungeon))
+		{
+			GS()->Chat(ClientID, "You can't change profession in dungeons");
+			return true;
+		}
+
+		// check spam
 		if((pPlayer->m_aPlayerTick[LastDamage] + Server()->TickSpeed() * 5) > Server()->Tick())
 		{
 			GS()->Chat(ClientID, "Wait a couple of seconds, your player is currently in combat or taking damage");
 			return true;
 		}
 
+		// change class
 		pPlayer->Account()->ChangeProfession(ProfessionID);
 		pPlayer->GetCharacter()->UpdateEquippedStats();
 		pPlayer->m_VotesData.ResetExtraID();
@@ -745,6 +577,398 @@ std::string CAccountManager::HashPassword(const std::string& Password, const std
 	return std::string(hash);
 }
 
+AccountCodeResult CAccountManager::RegisterAccount(int ClientID, const char* pLogin, const char* pPassword)
+{
+	// check length
+	const int LengthLogin = str_length(pLogin);
+	const int LengthPassword = str_length(pPassword);
+	if(LengthLogin > LENGTH_LOGPASS_MAX || LengthLogin < LENGTH_LOGPASS_MIN || LengthPassword > LENGTH_LOGPASS_MAX || LengthPassword < LENGTH_LOGPASS_MIN)
+	{
+		GS()->Chat(ClientID, "The username and password must each contain '{} - {} characters'.", LENGTH_LOGPASS_MIN, LENGTH_LOGPASS_MAX);
+		return AccountCodeResult::AOP_MISMATCH_LENGTH_SYMBOLS;
+	}
+
+	// check register state
+	const auto cClearNick = CSqlString<32>(Server()->ClientName(ClientID));
+	ResultPtr pRes = Database->Execute<DB::SELECT>("ID", "tw_accounts_data", "WHERE Nick = '{}'", cClearNick.cstr());
+	if(pRes->next())
+	{
+		GS()->Chat(ClientID, "Sorry, but that game nickname is already taken by another player. To regain access, reach out to the support team or alter your nickname.");
+		GS()->Chat(ClientID, "Discord: \"{}\".", g_Config.m_SvDiscordInviteLink);
+		return AccountCodeResult::AOP_NICKNAME_ALREADY_EXIST;
+	}
+
+	// get the highest ID from the tw_accounts table
+	ResultPtr pResID = Database->Execute<DB::SELECT>("ID", "tw_accounts", "ORDER BY ID DESC LIMIT 1");
+	const int InitID = pResID->next() ? pResID->getInt("ID") + 1 : 1;
+
+	// convert the login and password to CSqlString objects
+	const auto cClearLogin = CSqlString<32>(pLogin);
+	const auto cClearPass = CSqlString<32>(pPassword);
+
+	// get and store the client's IP address
+	char aAddrStr[64];
+	Server()->GetClientAddr(ClientID, aAddrStr, sizeof(aAddrStr));
+
+	// generate a random password salt
+	char aSalt[32] = { 0 };
+	secure_random_password(aSalt, sizeof(aSalt), 24);
+	Database->Execute<DB::INSERT>("tw_accounts", "(ID, Username, Password, PasswordSalt, RegisterDate, RegisteredIP) VALUES ('{}', '{}', '{}', '{}', UTC_TIMESTAMP(), '{}')", InitID, cClearLogin.cstr(), HashPassword(cClearPass.cstr(), aSalt).c_str(), aSalt, aAddrStr);
+	Database->Execute<DB::INSERT, 100>("tw_accounts_data", "(ID, Nick) VALUES ('{}', '{}')", InitID, cClearNick.cstr());
+
+	// information
+	Server()->UpdateAccountBase(InitID, cClearNick.cstr(), g_Config.m_SvMinRating);
+	GS()->Chat(ClientID, "- Registration complete! Don't forget to save your data.");
+	GS()->Chat(ClientID, "# Your nickname is a unique identifier.");
+	GS()->Chat(ClientID, "# Log in: \"/login {} {}\"", cClearLogin.cstr(), cClearPass.cstr());
+	return AccountCodeResult::AOP_REGISTER_OK;
+}
+
+AccountCodeResult CAccountManager::LoginAccount(int ClientID, const char* pLogin, const char* pPassword)
+{
+	// check valid player
+	auto* pPlayer = GS()->GetPlayer(ClientID, false);
+	if(!pPlayer)
+		return AccountCodeResult::AOP_UNKNOWN;
+
+	// check valid login and password
+	const int LengthLogin = str_length(pLogin);
+	const int LengthPassword = str_length(pPassword);
+	if(LengthLogin > LENGTH_LOGPASS_MAX || LengthLogin < LENGTH_LOGPASS_MIN || LengthPassword > LENGTH_LOGPASS_MAX || LengthPassword < LENGTH_LOGPASS_MIN)
+	{
+		GS()->Chat(ClientID, "The username and password must each contain '{} - {} characters'.", LENGTH_LOGPASS_MIN, LENGTH_LOGPASS_MAX);
+		return AccountCodeResult::AOP_MISMATCH_LENGTH_SYMBOLS;
+	}
+
+	// initialize sql string
+	const auto sqlStrLogin = CSqlString<32>(pLogin);
+	const auto sqlStrPass = CSqlString<32>(pPassword);
+	const auto sqlStrNick = CSqlString<32>(Server()->ClientName(ClientID));
+
+	// check if the account exists
+	ResultPtr pResAccount = Database->Execute<DB::SELECT>("*", "tw_accounts_data", "WHERE Nick = '{}'", sqlStrNick.cstr());
+	if(!pResAccount->next())
+	{
+		GS()->Chat(ClientID, "Sorry, we couldn't locate your username in our system.");
+		return AccountCodeResult::AOP_NICKNAME_NOT_EXIST;
+	}
+	int AccountID = pResAccount->getInt("ID");
+
+	// check is login and password correct
+	ResultPtr pResCheck = Database->Execute<DB::SELECT>("ID, LoginDate, Language, PinCode, Password, PasswordSalt",
+		"tw_accounts", "WHERE Username = '{}' AND ID = '{}'", sqlStrLogin.cstr(), AccountID);
+	if(!pResCheck->next() || str_comp(pResCheck->getString("Password").c_str(), HashPassword(sqlStrPass.cstr(), pResCheck->getString("PasswordSalt").c_str()).c_str()) != 0)
+	{
+		GS()->Chat(ClientID, "Oops, that doesn't seem to be the right login or password");
+		return AccountCodeResult::AOP_LOGIN_WRONG;
+	}
+
+	// check if the account is banned
+	ResultPtr pResBan = Database->Execute<DB::SELECT>("BannedUntil, Reason", "tw_accounts_bans", "WHERE AccountId = '{}' AND current_timestamp() < `BannedUntil`", AccountID);
+	if(pResBan->next())
+	{
+		const auto BannedUntil = pResBan->getString("BannedUntil");
+		const auto Reason = pResBan->getString("Reason");
+		GS()->Chat(ClientID, "You account was suspended until '{}' with the reason of '{}'.", BannedUntil, Reason);
+		return AccountCodeResult::AOP_ACCOUNT_BANNED;
+	}
+
+	// check is player ingame
+	if(GS()->GetPlayerByUserID(AccountID) != nullptr)
+	{
+		GS()->Chat(ClientID, "The account is already in the game.");
+		return AccountCodeResult::AOP_ALREADY_IN_GAME;
+	}
+
+	// Update player account information from the database
+	const auto Language = pResCheck->getString("Language");
+	const auto LoginDate = pResCheck->getString("LoginDate");
+	const auto PinCode = pResCheck->getString("PinCode");
+	pPlayer->Account()->Init(AccountID, ClientID, sqlStrLogin.cstr(), Language, LoginDate, std::move(pResAccount));
+
+	// Send success messages to the client
+	GS()->Chat(ClientID, "- Welcome! You've successfully logged in!");
+	if(PinCode.empty())
+		GS()->Chat(ClientID, "PIN is not set, set it using '/set_pin'.");
+	GS()->m_pController->DoTeamChange(pPlayer);
+	LoadAccount(pPlayer, true);
+	g_EventListenerManager.Notify<IEventListener::PlayerLogin>(pPlayer, pPlayer->Account());
+	return AccountCodeResult::AOP_LOGIN_OK;
+}
+
+void CAccountManager::LoadAccount(CPlayer* pPlayer, bool FirstInitilize)
+{
+	if(!pPlayer || !pPlayer->IsAuthed() || !GS()->IsPlayerInWorld(pPlayer->GetCID()))
+		return;
+
+	auto* pAccount = pPlayer->Account();
+
+	// Broadcast a message to the player with their current location
+	const int ClientID = pPlayer->GetCID();
+	GS()->Broadcast(ClientID, BroadcastPriority::VeryImportant, 300, "You are currently positioned at {}({})!\n- Rates: Exp {}% | Gold {}%",
+		Server()->GetWorldName(GS()->GetWorldID()), (GS()->IsAllowedPVP() ? "PVE/PVP" : "PVE"), GS()->m_Multipliers.Experience, GS()->m_Multipliers.Gold);
+
+	// Check if it is not the first initialization
+	if(!FirstInitilize)
+	{
+		const int Letters = Core()->MailboxManager()->GetMailCount(pAccount->GetID());
+		if(Letters > 0)
+		{
+			GS()->Chat(ClientID, "You have '{} unread letters'.", Letters);
+		}
+
+		pAccount->GetBonusManager().SendInfoAboutActiveBonuses();
+		pPlayer->m_VotesData.UpdateVotes(MENU_MAIN);
+		return;
+	}
+
+	// on player login
+	Core()->OnPlayerLogin(pPlayer);
+
+	// initialize default item's & settings
+	auto InitSettingsItem = [pPlayer](const std::unordered_map<int, int>& pItems)
+	{
+		for(auto& [id, defaultValue] : pItems)
+		{
+			if(auto pItem = pPlayer->GetItem(id))
+			{
+				if(!pItem->HasItem())
+					pItem->Add(1, defaultValue);
+			}
+		}
+	};
+
+	InitSettingsItem(
+		{
+			{ itHammer, 1 },
+			{ itShowEquipmentDescription, 0 },
+			{ itShowCriticalDamage, 1 },
+			{ itShowQuestStarNavigator, 1 },
+			{ itShowDetailGainMessages, 0 },
+			{ itShowOnlyFunctionModules, 1 },
+		});
+
+	// update player time periods
+	Core()->OnHandlePlayerTimePeriod(pPlayer);
+
+	// notify about rank
+	const int Rank = Server()->GetAccountRank(pAccount->GetID());
+	GS()->Chat(-1, "'{}' logged to account. Rank '#{}[{}]' ({})", Server()->ClientName(ClientID), Rank,
+		Server()->ClientCountryIsoCode(ClientID), pPlayer->Account()->GetRatingSystem().GetRankName());
+
+	// Change player's world ID to the latest correct world ID
+	const int LatestCorrectWorldID = GetLastVisitedWorldID(pPlayer);
+	if(LatestCorrectWorldID != GS()->GetWorldID())
+	{
+		pPlayer->ChangeWorld(LatestCorrectWorldID);
+		return;
+	}
+}
+
+void CAccountManager::SetPinCode(int ClientID, const char* pCurrentPasswordOrPin, const char* pNewPin, bool IsChangingPin)
+{
+	// check valid player
+	auto* pPlayer = GS()->GetPlayer(ClientID, true);
+	if(!pPlayer || !pPlayer->IsAuthed())
+	{
+		GS()->Chat(ClientID, "You must be logged in to set or change a PIN code.");
+		return;
+	}
+
+	// check valid pin length
+	const int LengthNewPin = str_length(pNewPin);
+	if(LengthNewPin < LENGTH_PIN_MIN || LengthNewPin > LENGTH_PIN_MAX)
+	{
+		GS()->Chat(ClientID, "PIN code must be {} to {} digits long.", LENGTH_PIN_MIN, LENGTH_PIN_MAX);
+		return;
+	}
+	for(int i = 0; i < LengthNewPin; ++i)
+	{
+		if(!isdigit(pNewPin[i]))
+		{
+			GS()->Chat(ClientID, "PIN code must consist of digits only.");
+			return;
+		}
+	}
+
+	// fetch current pin code
+	const auto AccountID = pPlayer->Account()->GetID();
+	std::string CurrentPinInDb;
+	bool bPinCurrentlySet = GetAccountPin(AccountID, CurrentPinInDb);
+
+	if(IsChangingPin)
+	{
+		// is not set need set pin
+		if(!bPinCurrentlySet)
+		{
+			GS()->Chat(ClientID, "You don't have a PIN code set.");
+			GS()->Chat(ClientID, "Use '/set_pin' to set your PIN.");
+			return;
+		}
+
+		// check valid pin
+		if(CurrentPinInDb != pCurrentPasswordOrPin)
+		{
+			GS()->Chat(ClientID, "The current PIN code you entered is incorrect.");
+			return;
+		}
+		if(str_comp(pCurrentPasswordOrPin, pNewPin) == 0)
+		{
+			GS()->Chat(ClientID, "The new PIN cannot be the same as the old PIN.");
+			return;
+		}
+	}
+	else
+	{
+		// is set need change pin
+		if(bPinCurrentlySet)
+		{
+			GS()->Chat(ClientID, "You already have a PIN code set.");
+			GS()->Chat(ClientID, "Use '/change_pin' to update your PIN.");
+			return;
+		}
+
+		// check valid password
+		ResultPtr pResAccount = Database->Execute<DB::SELECT>("Password, PasswordSalt", "tw_accounts", "WHERE ID = '{}'", AccountID);
+		if(!pResAccount->next())
+		{
+			GS()->Chat(ClientID, "Error retrieving account data.");
+			return;
+		}
+
+		const auto DbPassword = pResAccount->getString("Password");
+		const auto DbSalt = pResAccount->getString("PasswordSalt");
+		const CSqlString<32> sqlCurrentPassword(pCurrentPasswordOrPin);
+		if(DbPassword != HashPassword(sqlCurrentPassword.cstr(), DbSalt))
+		{
+			GS()->Chat(ClientID, "The account password you entered is incorrect.");
+			return;
+		}
+	}
+
+	// save new pin-code
+	const CSqlString<16> sqlNewPin(pNewPin);
+	Database->Execute<DB::UPDATE>("tw_accounts", "PinCode = '{}' WHERE ID = '{}'", sqlNewPin.cstr(), AccountID);
+	GS()->Chat(ClientID, "Your PIN code has been successfully {}!", Instance::Localize(ClientID, IsChangingPin ? "changed" : "set"));
+	return;
+}
+
+void CAccountManager::ChangePassword(int ClientID, const char* pOldPassword, const char* pNewPassword, const char* pPinCode)
+{
+	// check valid account
+	auto* pPlayer = GS()->GetPlayer(ClientID, true);
+	if(!pPlayer || !pPlayer->IsAuthed())
+	{
+		GS()->Chat(ClientID, "You must be logged in to change your password.");
+		return;
+	}
+
+	// check valid length and password same
+	const int LengthOldPass = str_length(pOldPassword);
+	const int LengthNewPass = str_length(pNewPassword);
+	if(LengthOldPass < LENGTH_LOGPASS_MIN || LengthOldPass > LENGTH_LOGPASS_MAX || LengthNewPass < LENGTH_LOGPASS_MIN || LengthNewPass > LENGTH_LOGPASS_MAX)
+	{
+		GS()->Chat(ClientID, "The old and new passwords must each contain '{} - {} characters'.", LENGTH_LOGPASS_MIN, LENGTH_LOGPASS_MAX);
+		return;
+	}
+	if(str_comp(pOldPassword, pNewPassword) == 0)
+	{
+		GS()->Chat(ClientID, "The new password cannot be the same as the old password.");
+		return;
+	}
+
+	// get pincode
+	std::string PinFromDb;
+	const int AccountID = pPlayer->Account()->GetID();
+	bool bPinIsSet = GetAccountPin(AccountID, PinFromDb);
+
+	// check is pincode set
+	if(!bPinIsSet)
+	{
+		GS()->Chat(ClientID, "For security, you must first set up a PIN code.");
+		GS()->Chat(ClientID, "Use '/set_pin' to set your PIN.");
+		return;
+	}
+
+	// require pin code
+	if(pPinCode == nullptr || *pPinCode == '\0')
+	{
+		GS()->Chat(ClientID, "PIN code is required to change your password.");
+		return;
+	}
+
+	// check valid and length pin code
+	const int LengthPin = str_length(pPinCode);
+	if(LengthPin < LENGTH_PIN_MIN || LengthPin > LENGTH_PIN_MAX)
+	{
+		GS()->Chat(ClientID, "Invalid PIN code format.");
+		return;
+	}
+	for(int i = 0; i < LengthPin; ++i)
+	{
+		if(!isdigit(pPinCode[i]))
+		{
+			GS()->Chat(ClientID, "PIN code must consist of digits only.");
+			return;
+		}
+	}
+
+	// check valid pincode
+	if(PinFromDb != pPinCode)
+	{
+		GS()->Chat(ClientID, "The PIN code you entered is incorrect.");
+		return;
+	}
+
+	// get current password
+	ResultPtr pResAccount = Database->Execute<DB::SELECT>("Password, PasswordSalt", "tw_accounts", "WHERE ID = '{}'", AccountID);
+	if(!pResAccount->next())
+	{
+		GS()->Chat(ClientID, "Error retrieving account data.");
+		return;
+	}
+
+	// check valid password
+	const auto CurrentDbPassword = pResAccount->getString("Password");
+	const auto CurrentDbSalt = pResAccount->getString("PasswordSalt");
+	const CSqlString<32> sqlOldPassword(pOldPassword);
+	if(CurrentDbPassword != HashPassword(sqlOldPassword.cstr(), CurrentDbSalt))
+	{
+		GS()->Chat(ClientID, "The old password you entered is incorrect.");
+		return;
+	}
+
+	// update new password
+	char aNewSalt[32] = { 0 };
+	secure_random_password(aNewSalt, sizeof(aNewSalt), 24);
+	const CSqlString<32> sqlNewPassword(pNewPassword);
+	const std::string HashedNewPassword = HashPassword(sqlNewPassword.cstr(), aNewSalt);
+	Database->Execute<DB::UPDATE>("tw_accounts", "Password = '{}', PasswordSalt = '{}' WHERE ID = '{}'", HashedNewPassword.c_str(), aNewSalt, AccountID);
+
+	// information
+	GS()->Chat(ClientID, "Your password has been successfully changed!");
+	GS()->Chat(ClientID, "Please remember your new login details.");
+	GS()->Chat(ClientID, "New password: '{}'.", sqlNewPassword.cstr());
+	return;
+}
+
+bool CAccountManager::ChangeNickname(const std::string& newNickname, int ClientID) const
+{
+	CPlayer* pPlayer = GS()->GetPlayer(ClientID, true);
+	if(!pPlayer)
+		return false;
+
+	// check newnickname
+	const auto cClearNick = CSqlString<32>(newNickname.c_str());
+	ResultPtr pRes = Database->Execute<DB::SELECT>("ID", "tw_accounts_data", "WHERE Nick = '{}'", cClearNick.cstr());
+	if(pRes->next())
+		return false;
+
+	Database->Execute<DB::UPDATE>("tw_accounts_data", "Nick = '{}' WHERE ID = '{}'", cClearNick.cstr(), pPlayer->Account()->GetID());
+	Server()->SetClientName(ClientID, newNickname.c_str());
+	return true;
+}
+
 void CAccountManager::UseVoucher(int ClientID, const char* pVoucher) const
 {
 	CPlayer* pPlayer = GS()->GetPlayer(ClientID);
@@ -752,7 +976,7 @@ void CAccountManager::UseVoucher(int ClientID, const char* pVoucher) const
 		return;
 
 	char aSelect[256];
-	const CSqlString<32> cVoucherCode = CSqlString<32>(pVoucher);
+	const auto cVoucherCode = CSqlString<32>(pVoucher);
 	str_format(aSelect, sizeof(aSelect), "v.*, IF((SELECT r.ID FROM tw_voucher_redeemed r WHERE CASE v.Multiple WHEN 1 THEN r.VoucherID = v.ID AND r.UserID = %d ELSE r.VoucherID = v.ID END) IS NULL, FALSE, TRUE) AS used", pPlayer->Account()->GetID());
 
 	ResultPtr pResVoucher = Database->Execute<DB::SELECT>(aSelect, "tw_voucher v", "WHERE v.Code = '{}'", cVoucherCode.cstr());
@@ -860,8 +1084,35 @@ std::vector<CAccountManager::AccBan> CAccountManager::BansAccount() const
 		std::string BannedUntil = pResBan->getString("BannedUntil").c_str();
 		std::string PlayerNickname = Server()->GetAccountNickname(AccountID);
 		std::string Reason = pResBan->getString("Reason").c_str();
-		out.push_back({ ID, BannedUntil, std::move(PlayerNickname), std::move(Reason) });
+		out.emplace_back(ID, BannedUntil, std::move(PlayerNickname), std::move(Reason));
 	}
 
 	return out;
+}
+
+bool CAccountManager::GetAccountPin(int AccountID, std::string& OutPinCode) const
+{
+	ResultPtr pResPin = Database->Execute<DB::SELECT>("PinCode", "tw_accounts", "WHERE ID = '{}'", AccountID);
+	if(pResPin->next())
+	{
+		OutPinCode = pResPin->getString("PinCode");
+		return !OutPinCode.empty();
+	}
+
+	OutPinCode.clear();
+	return false;
+}
+
+int CAccountManager::GetLastVisitedWorldID(CPlayer* pPlayer) const
+{
+	const auto pWorldIterator = std::ranges::find_if(pPlayer->Account()->m_aHistoryWorld, [&](int WorldID)
+	{
+		if(GS()->GetWorldData(WorldID))
+		{
+			int RequiredLevel = GS()->GetWorldData(WorldID)->GetRequiredLevel();
+			return Server()->IsWorldType(WorldID, WorldType::Default) && pPlayer->Account()->GetLevel() >= RequiredLevel;
+		}
+		return false;
+	});
+	return pWorldIterator != pPlayer->Account()->m_aHistoryWorld.end() ? *pWorldIterator : BASE_GAME_WORLD_ID;
 }

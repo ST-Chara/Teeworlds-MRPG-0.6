@@ -1,22 +1,31 @@
+#include "get_valid_ai_util.h"
 #include "eidolon_ai.h"
+#include "mob_ai.h"
 
 #include <game/server/entities/character_bot.h>
 #include <game/server/gamecontext.h>
 
 #include <game/server/core/scenarios/scenario_eidolon.h>
+#include <game/server/core/tools/scenario_player_manager.h>
 
 CEidolonAI::CEidolonAI(CPlayerBot* pPlayer, CCharacterBotAI* pCharacter)
 	: CBaseAI(pPlayer, pCharacter) {}
 
 bool CEidolonAI::CanDamage(CPlayer* pFrom)
 {
-	auto* pOwner = m_pPlayer->GetEidolonOwner();
+	if(pFrom->IsBot())
+	{
+		auto* pFromBot = static_cast<CPlayerBot*>(pFrom);
+		if(auto* pMobAI = GetValidAI<CMobAI>(pFromBot))
+			return !pMobAI->IsNeutral();
+	}
 
-	if(m_pPlayer->GetEidolonOwner() != pFrom)
+	auto* pOwner = m_pPlayer->GetEidolonOwner();
+	if(pOwner != pFrom)
 	{
 		if(pOwner)
 		{
-			auto* pOwnerLastAttacker = pOwner->GetCharacter()->GetLastAttacker();
+			auto* pOwnerLastAttacker = pOwner->GetCharacter()->GetLastPlayerAttacker(2);
 			if(pOwnerLastAttacker &&
 				pOwnerLastAttacker->GetCID() == pFrom->GetCID())
 				return true;
@@ -24,7 +33,7 @@ bool CEidolonAI::CanDamage(CPlayer* pFrom)
 			auto* pFromChar = pFrom->GetCharacter();
 			if(pFromChar)
 			{
-				auto pFromLastAttacker = pFromChar->GetLastAttacker();
+				auto pFromLastAttacker = pFromChar->GetLastPlayerAttacker(2);
 				if(pFromLastAttacker &&
 					(pFromLastAttacker->GetCID() == pOwner->GetCID() ||
 						pFromLastAttacker->GetCID() == m_pPlayer->GetCID()))
@@ -35,19 +44,12 @@ bool CEidolonAI::CanDamage(CPlayer* pFrom)
 		return false;
 	}
 
-	if(pFrom->IsBot())
-	{
-		const auto* pFromBot = static_cast<CPlayerBot*>(pFrom);
-		if(pFromBot && (pFromBot->GetBotType() == TYPE_BOT_MOB))
-			return true;
-	}
-
 	return false;
 }
 
 void CEidolonAI::OnSpawn()
 {
-	m_pPlayer->Scenarios().Start(std::make_unique<CEidolonScenario>());
+	GS()->ScenarioPlayerManager()->RegisterScenario<CEidolonScenario>(m_ClientID);
 	m_pCharacter->m_Core.m_Solo = true;
 }
 
@@ -59,13 +61,13 @@ void CEidolonAI::OnDie(int Killer, int Weapon)
 
 	if(Weapon != WEAPON_SELF && Weapon != WEAPON_WORLD)
 	{
-		auto optItemID = pOwner->GetEquippedItemID(ItemType::EquipEidolon);
-		if(optItemID.has_value())
+		auto EquippedEidolonItemIdOpt = pOwner->GetEquippedSlotItemID(ItemType::EquipEidolon);
+		if(EquippedEidolonItemIdOpt.has_value())
 		{
-			auto* pPlayerItem = pOwner->GetItem(optItemID.value());
+			auto* pPlayerItem = pOwner->GetItem(EquippedEidolonItemIdOpt.value());
 			if(pPlayerItem && pPlayerItem->GetDurability() > 0)
 			{
-				pPlayerItem->SetDurability(0);
+				//pPlayerItem->SetDurability(0); TODO crashed by event listener inventory durability item it's updated from character all item's and these item's destroyed eidolon character.
 				pOwner->GS()->Chat(pOwner->GetCID(), "Your eidolon item 'durability is 0'.");
 			}
 		}
@@ -81,7 +83,6 @@ void CEidolonAI::OnTargetRules(float Radius)
 	// find from players
 	const auto* pPlayer = SearchPlayerCondition(Radius, [&](const CPlayer* pCandidate)
 	{
-		// const auto* pOwnerChar = pOwner->GetCharacter();
 		const bool DamageDisabled = pCandidate->GetCharacter()->m_Core.m_DamageDisabled;
 		const bool AllowedPVP = pOwner->GetCID() != pCandidate->GetCID() && m_pCharacter->IsAllowedPVP(pCandidate->GetCID());
 		return !DamageDisabled && AllowedPVP;
@@ -93,8 +94,9 @@ void CEidolonAI::OnTargetRules(float Radius)
 		pPlayer = SearchPlayerBotCondition(Radius, [&](CPlayerBot* pCandidate)
 		{
 			const bool DamageDisabled = pOwner->GetCharacter()->m_Core.m_DamageDisabled;
-
-			return !DamageDisabled && pOwner->GetCharacter()->IsAllowedPVP(pCandidate->GetCID());
+			const bool AllowedPVP = m_pCharacter->IsAllowedPVP(pCandidate->GetCID())
+				&& pCandidate->GetCharacter()->IsAllowedPVP(m_ClientID);
+			return !DamageDisabled && AllowedPVP;
 		});
 	}
 
@@ -107,7 +109,6 @@ void CEidolonAI::OnTargetRules(float Radius)
 void CEidolonAI::Process()
 {
 	m_pCharacter->SetSafeFlags(SAFEFLAG_COLLISION_DISABLED);
-	m_pCharacter->ResetInput();
 
 	const auto* pOwner = m_pPlayer->GetEidolonOwner();
 	if(!pOwner || !pOwner->GetCharacter())

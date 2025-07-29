@@ -114,7 +114,7 @@ void CAchievementManager::ShowTypeList(CPlayer* pPlayer, AchievementType Type) c
 
 	// achievements list
 	VoteWrapper(ClientID).Add("\u2263 {} achievements", GetAchievementTypeName(Type));
-	for(auto& pAchievement : achievements)
+	for(const auto& pAchievement : achievements)
 	{
 		const auto* pInfo = pAchievement->Info();
 		if(pInfo->GetType() != Type)
@@ -136,7 +136,7 @@ void CAchievementManager::AddAchievementDetails(VoteWrapper& VAchievement, const
 	auto addProgressInfo = [&](VoteWrapper& wrapper, auto progress, auto required, std::string action, std::string needed = {})
 	{
 		const auto progressAchievement = translate_to_percent(Required, Progress);
-		const auto progressBar = mystd::string::progressBar(100, (int)progressAchievement, 10, "\u25B0", "\u25B1");
+		const auto progressBar = mystd::string::progressBar(100, (int)progressAchievement, 5, "\u25B0", "\u25B1");
 		wrapper.Add("Progress: {} - {~.2}%", progressBar, progressAchievement);
 		wrapper.Add("Achievement point: {}", pInfo->GetPoint());
 		if(needed.empty())
@@ -188,10 +188,10 @@ void CAchievementManager::AddAchievementDetails(VoteWrapper& VAchievement, const
 			VAchievement.Add("Equip {}", pItem->GetName());
 			break;
 		}
-		case AchievementType::UnlockWorld:
+		case AchievementType::CompleteQuest:
 		{
-			int worldID = pInfo->GetCriteria();
-			VAchievement.Add("Unlock {}", Server()->GetWorldName(worldID));
+			CQuestDescription* pQuestInfo = GS()->GetQuestInfo(pInfo->GetCriteria());
+			VAchievement.Add("Quest {}", pQuestInfo->GetName());
 			break;
 		}
 		case AchievementType::Leveling:
@@ -226,7 +226,7 @@ int CAchievementManager::GetCountByType(AchievementType Type) const
 
 int CAchievementManager::GetCompletedCountByType(int ClientID, AchievementType Type) const
 {
-	auto& pAchievements = CAchievement::Data()[ClientID];
+	const auto& pAchievements = CAchievement::Data()[ClientID];
 	return (int)std::ranges::count_if(pAchievements, [Type](const CAchievement* p)
 	{
 		return p->Info()->GetType() == Type && p->IsCompleted();
@@ -235,7 +235,7 @@ int CAchievementManager::GetCompletedCountByType(int ClientID, AchievementType T
 
 int CAchievementManager::GetCompletedCount(int ClientID) const
 {
-	auto& pAchievements = CAchievement::Data()[ClientID];
+	const auto& pAchievements = CAchievement::Data()[ClientID];
 	return (int)std::ranges::count_if(pAchievements, [](const CAchievement* p)
 	{
 		return p->IsCompleted();

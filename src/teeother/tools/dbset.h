@@ -5,112 +5,73 @@
 
 class DBSet
 {
-	// Create an empty string variable called m_Data to store the data
-	std::string m_Data {};
-
-	// Create an empty unordered_set variable called m_DataItems to store unique data items
-	ska::flat_hash_map<std::string, size_t> m_DataItems {};
-
-	// Initialize the function
-	void Init()
-	{
-		// Check if m_Data is not empty
-		if(!m_Data.empty())
-		{
-			// Set the delimiter, starting and ending positions for finding the delimiter
-			const std::string delimiter = ",";
-			size_t start = 0;
-			int iteration = 0;
-			
-			// Reserve memory for m_DataItems to avoid unnecessary reallocations
-			m_DataItems.reserve(m_Data.length() / delimiter.length() + 1);
-
-			// Continue looping until all delimiters are found
-			while(start < m_Data.size())
-			{
-				// Find the next occurrence of the delimiter starting from the current start position
-				auto end = m_Data.find(delimiter, start);
-				if(end == std::string::npos)
-					end = m_Data.size();
-
-				// Add a new item to m_DataItems by copying the substring between the start and end positions
-				// and remove leading and trailing spaces from the substring
-				auto substring = m_Data.substr(start, end - start);
-				while(substring.find_first_of(' ') == 0)
-					substring.erase(0, 1);
-				while(substring.find_last_of(' ') == substring.size() - 1)
-					substring.erase(substring.size() - 1, 1);
-				m_DataItems[substring] = (size_t)1 << iteration++;
-
-				// Update the start position for the next iteration
-				start = end + delimiter.length();
-			}
-		}
-	}
+	std::vector<std::string> m_DataItems {};
 
 public:
-	// Default
+	// constructors
 	DBSet() = default;
-
-	// Parameterized constructor that takes an lvalue reference to a string
-	DBSet(const std::string& pData) : m_Data(pData)
+	DBSet(std::string_view Data)
 	{
-		Init();
+		Init(Data);
 	}
 
-	// Parameterized constructor that takes an rvalue reference to a string
-	DBSet(std::string&& pData) : m_Data(std::move(pData))
+	// operator =
+	DBSet& operator=(std::string_view set)
 	{
-		Init();
-	}
-
-	// Operator bitwise AND overload for checking if a specific flag exists in the data items collection
-	bool operator&(const size_t& flag) const
-	{
-		return std::any_of(m_DataItems.begin(), m_DataItems.end(), [flag](const auto& item)
-		{
-			const auto& [key, value] = item;
-			return flag & value;
-		});
-	}
-
-	// Assignment operator overload for assigning a std::string to a DBSet object
-	DBSet& operator=(const std::string& set)
-	{
-		// Create a temporary DBSet object with the given std::string
 		DBSet tmp(set);
-
-		// Move assign the temporary object to the current object using std::move
 		*this = std::move(tmp);
-
-		// Return the current object
 		return *this;
 	}
 
-	// Move assignment operator overload for assigning an rvalue std::string to a DBSet object
-	DBSet& operator=(std::string&& set)
+	// emplace function
+	template <typename... Args>
+	void emplace(Args&&... args)
 	{
-		// Move assign the rvalue std::string to the data member of the current object
-		m_Data = std::move(set);
-
-		// Initialize the current object (call the Init() function)
-		Init();
-
-		// Return the current object
-		return *this;
+		m_DataItems.emplace_back(std::forward<Args>(args)...);
 	}
 
-	// Checks if a specific set exists in the data items collection.
-	bool hasSet(const std::string& pSet) const
+	// sort items, default by less
+	void sortItems(std::function<bool(const std::string&, const std::string&)> comparator = std::less<>())
 	{
-		return m_DataItems.find(pSet) != m_DataItems.end();
+		std::sort(m_DataItems.begin(), m_DataItems.end(), comparator);
 	}
 
-	// Return a constant reference to the unordered_set<std::string> data member m_DataItems
-	const ska::flat_hash_map<std::string, size_t>& GetDataItems() const
+	// dump string
+	std::string dump() const
 	{
-		return m_DataItems;
+		if(m_DataItems.empty())
+			return "";
+
+		std::string result = m_DataItems[0];
+		for(size_t i = 1; i < m_DataItems.size(); ++i)
+			result += "," + m_DataItems[i];
+	}
+
+	bool hasSet(const std::string& pSet) const { return std::ranges::find(m_DataItems, pSet) != m_DataItems.end(); }
+	const std::vector<std::string>& getItems() const { return m_DataItems; }
+
+private:
+	void Init(std::string_view TmpData)
+	{
+		if(TmpData.empty())
+			return;
+
+		const std::string_view delimiter = ",";
+		size_t iteration = 0;
+		m_DataItems.reserve(TmpData.length() / delimiter.length() + 1);
+
+		auto split_view = TmpData | std::views::split(delimiter);
+		for(auto token_range : split_view)
+		{
+			std::string token(token_range.begin(), token_range.end());
+			token.erase(token.find_last_not_of(' ') + 1);
+			token.erase(0, token.find_first_not_of(' '));
+
+			if(!token.empty())
+				m_DataItems.push_back(token);
+		}
 	}
 };
+
 
 #endif //GAME_SERVER_MMO_UTILS_DBSET_H

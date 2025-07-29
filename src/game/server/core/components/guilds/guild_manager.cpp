@@ -4,7 +4,7 @@
 
 #include <game/server/gamecontext.h>
 
-#include <game/server/core/components/Inventory/InventoryManager.h>
+#include <game/server/core/components/inventory/inventory_manager.h>
 #include <game/server/core/components/mails/mail_wrapper.h>
 
 #include "../houses/entities/house_door.h"
@@ -56,7 +56,7 @@ void CGuildManager::OnInitWorld(const std::string& SqlQueryWhereWorld)
 void CGuildManager::OnTick()
 {
 	// check if we are in the main world
-	if(GS()->GetWorldID() != MAIN_WORLD_ID)
+	if(GS()->GetWorldID() != INITIALIZER_WORLD_ID)
 		return;
 
 	// update guild wars
@@ -83,15 +83,13 @@ void CGuildManager::OnCharacterTile(CCharacter* pChr)
 
 	if(pChr->GetTiles()->IsActive(TILE_GUILD_CHAIR))
 	{
-		if(Server()->Tick() % (Server()->TickSpeed() * 5) == 0)
+		if(auto* pGuildHouse = GetHouseByPos(pChr->GetPos()))
 		{
-			//const int HouseID = GetPosHouseID(pChr->m_Core.m_Pos);
-			//const int GuildID = GetHouseGuildID(HouseID);
-			//if(HouseID <= 0 || GuildID <= 0)
-			//	return true;
-
-			//const int Exp = CGuild::ms_aGuild[GuildID].m_UpgradesData(CGuild::CHAIR_EXPERIENCE, 0).m_Value;
-			//pPlayer->AccountManager()->AddExperience(Exp);
+			if(pGuildHouse->GetGuild())
+			{
+				const auto ChairLevel = pGuildHouse->GetGuild()->GetUpgrades().getRef<int>((int)GuildUpgrade::ChairLevel);
+				pPlayer->Account()->HandleChair(ChairLevel);
+			}
 		}
 	}
 }
@@ -542,7 +540,7 @@ bool CGuildManager::OnPlayerVoteCommand(CPlayer* pPlayer, const char* pCmd, int 
 		}
 
 		// update search buffer and reset votes
-		str_copy(pPlayer->GetTempData().m_aGuildSearchBuf, pReason, sizeof(pPlayer->GetTempData().m_aGuildSearchBuf));
+		str_copy(pPlayer->GetSharedData().m_aGuildSearchBuf, pReason, sizeof(pPlayer->GetSharedData().m_aGuildSearchBuf));
 		pPlayer->m_VotesData.UpdateVotes(MENU_GUILD_FINDER);
 		return true;
 	}
@@ -698,8 +696,8 @@ bool CGuildManager::OnPlayerVoteCommand(CPlayer* pPlayer, const char* pCmd, int 
 			return true;
 		}
 
-		// check is same plant item with current
-		if(ItemID == pFarmzone->GetItemID())
+		// check is same planted item with current
+		if(pFarmzone->GetNode().m_vItems.hasElement(ItemID))
 		{
 			GS()->Chat(ClientID, "This item has already been planted on this farm.");
 			return true;
@@ -1040,7 +1038,7 @@ bool CGuildManager::OnSendMenuMotd(CPlayer* pPlayer, int Menulist)
 	return false;
 }
 
-void CGuildManager::OnTimePeriod(ETimePeriod Period)
+void CGuildManager::OnGlobalTimePeriod(ETimePeriod Period)
 {
 	// handle time period for each guilds
 	for(auto& pGuild : CGuild::Data())
@@ -1227,7 +1225,7 @@ void CGuildManager::ShowUpgrades(CPlayer* pPlayer) const
 	// information
 	VoteWrapper VInfo(ClientID, VWF_STYLE_STRICT_BOLD|VWF_SEPARATE, "\u2324 Guild upgrades (Information)");
 	VInfo.Add("All improvements are solely related to the guild itself.");
-	VInfo.Add("Bank: {}", pGuild->GetBankManager()->Get());
+	VInfo.Add("Bank: {$}", pGuild->GetBankManager()->Get());
 	VoteWrapper::AddEmptyline(ClientID);
 
 	// guild-related upgrades
@@ -1246,9 +1244,9 @@ void CGuildManager::ShowUpgrades(CPlayer* pPlayer) const
 	if(pGuild->HasHouse())
 	{
 		VoteWrapper VUpgrHouse(ClientID, VWF_ALIGN_TITLE|VWF_STYLE_SIMPLE, "\u2725 House-related upgrades");
-		for(int i = (int)GuildUpgrade::ChairExperience; i < (int)GuildUpgrade::NumGuildHouseUpgr; i++)
+		for(int i = (int)GuildUpgrade::ChairLevel; i < (int)GuildUpgrade::NumGuildHouseUpgr; i++)
 		{
-			int Price = pGuild->GetUpgradePrice(static_cast<GuildUpgrade>(i));
+			const auto Price = pGuild->GetUpgradePrice(static_cast<GuildUpgrade>(i));
 			const auto* pUpgrade = &pGuild->GetUpgrades().getField<int>(i);
 
 			VUpgrHouse.AddOption("GUILD_UPGRADE", i, "Upgrade {} ({}) {$} gold",
@@ -1510,19 +1508,22 @@ void CGuildManager::ShowFarmzonesControl(CPlayer* pPlayer) const
 	if(!pHouse)
 		return;
 
-	int ClientID = pPlayer->GetCID();
-	int FarmzonesNum = (int)pHouse->GetFarmzonesManager()->GetContainer().size();
+	const auto ClientID = pPlayer->GetCID();
+	const auto FarmzonesSize = (int)pHouse->GetFarmzonesManager()->GetContainer().size();
 
 	// information
 	VoteWrapper VInfo(ClientID, VWF_STYLE_STRICT_BOLD | VWF_SEPARATE, "\u2324 Farm zones information");
 	VInfo.Add("You can control your farm zones in the house");
-	VInfo.Add("Your home has: {} farm zones.", FarmzonesNum);
+	VInfo.Add("Your home has: {} farm zones.", FarmzonesSize);
 	VoteWrapper::AddEmptyline(ClientID);
 
 	// farm zones control
 	VoteWrapper VFarmzones(ClientID, VWF_OPEN|VWF_STYLE_SIMPLE, "\u2743 Farm zone's control");
 	for(auto& [ID, Farmzone] : pHouse->GetFarmzonesManager()->GetContainer())
-		VFarmzones.AddMenu(MENU_GUILD_HOUSE_FARMZONE_SELECT, ID, "Farm {} zone / {}", Farmzone.GetName(), GS()->GetItemInfo(Farmzone.GetItemID())->GetName());
+	{
+		const auto sizeItems = Farmzone.GetNode().m_vItems.size();
+		VFarmzones.AddMenu(MENU_GUILD_HOUSE_FARMZONE_SELECT, ID, "Farm {} zone / {} variety", Farmzone.GetName(), sizeItems);
+	}
 
 	VoteWrapper::AddEmptyline(ClientID);
 }
@@ -1542,6 +1543,7 @@ void CGuildManager::ShowFarmzoneEdit(CPlayer* pPlayer, int FarmzoneID) const
 		return;
 
 	const auto ClientID = pPlayer->GetCID();
+	auto& Node = pFarmzone->GetNode();
 
 	// information
 	VoteWrapper VInfo(ClientID, VWF_ALIGN_TITLE|VWF_SEPARATE|VWF_STYLE_STRICT_BOLD, "\u2741 Farm {} zone", pFarmzone->GetName());
@@ -1550,7 +1552,7 @@ void CGuildManager::ShowFarmzoneEdit(CPlayer* pPlayer, int FarmzoneID) const
 	VoteWrapper::AddEmptyline(ClientID);
 
 	// planted list
-	for(auto& Elem : pFarmzone->GetNode().m_vItems)
+	for(auto& Elem : Node.m_vItems)
 	{
 		auto ItemID = Elem.Element;
 		auto* pItemInfo = GS()->GetItemInfo(ItemID);
@@ -1565,7 +1567,7 @@ void CGuildManager::ShowFarmzoneEdit(CPlayer* pPlayer, int FarmzoneID) const
 	for(auto& ID : vItems)
 	{
 		bool AllowPlant = true;
-		for(auto& Elem : pFarmzone->GetNode().m_vItems)
+		for(auto& Elem : Node.m_vItems)
 		{
 			if(Elem.Element == ID)
 			{
@@ -1576,8 +1578,11 @@ void CGuildManager::ShowFarmzoneEdit(CPlayer* pPlayer, int FarmzoneID) const
 
 		auto* pPlayerItem = pPlayer->GetItem(ID);
 		if(AllowPlant && pPlayerItem->HasItem())
+		{
 			VPossiblePlanting.AddOption("GUILD_HOUSE_FARM_ZONE_TRY_PLANT", FarmzoneID, ID, "Try plant {} (has {})", pPlayerItem->Info()->GetName(), pPlayerItem->GetValue());
+		}
 	}
+
 	VoteWrapper::AddEmptyline(ClientID);
 }
 
@@ -1593,14 +1598,14 @@ void CGuildManager::ShowFinder(CPlayer* pPlayer) const
 
 	// search field
 	VoteWrapper VSearch(ClientID, VWF_OPEN | VWF_STYLE_SIMPLE, "\u2732 Search by name");
-	VSearch.AddOption("GUILD_FINDER_SEARCH_FIELD", "Search: [{}]", pPlayer->GetTempData().m_aGuildSearchBuf[0] == '\0' ? "by reason field" : pPlayer->GetTempData().m_aGuildSearchBuf);
+	VSearch.AddOption("GUILD_FINDER_SEARCH_FIELD", "Search: [{}]", pPlayer->GetSharedData().m_aGuildSearchBuf[0] == '\0' ? "by reason field" : pPlayer->GetSharedData().m_aGuildSearchBuf);
 	VoteWrapper::AddEmptyline(ClientID);
 
 	// search list
 	VoteWrapper VList(ClientID, VWF_OPEN | VWF_STYLE_SIMPLE, "Guild list");
 	for(auto& pGuild : CGuild::Data())
 	{
-		if(pPlayer->GetTempData().m_aGuildSearchBuf[0] == '\0' || str_utf8_find_nocase(pGuild->GetName(), pPlayer->GetTempData().m_aGuildSearchBuf) != nullptr)
+		if(pPlayer->GetSharedData().m_aGuildSearchBuf[0] == '\0' || str_utf8_find_nocase(pGuild->GetName(), pPlayer->GetSharedData().m_aGuildSearchBuf) != nullptr)
 		{
 			int OwnerUID = pGuild->GetLeaderUID();
 			VList.AddMenu(MENU_GUILD_FINDER_SELECT, pGuild->GetID(), "{} (leader {})", pGuild->GetName(), Server()->GetAccountNickname(OwnerUID));
@@ -1671,7 +1676,9 @@ void CGuildManager::ShowDetail(CPlayer* pPlayer, CGuildHouse* pHouse) const
 	else
 	{
 		MHouseDetail.AddText("Owner: {}", pHouse->GetOwnerName());
+		MHouseDetail.AddText("Days left: {}", pHouse->GetRentDays());
 	}
+	MHouseDetail.AddSeparateLine();
 	MHouseDetail.Send(MOTD_MENU_GUILD_HOUSE_DETAIL);
 }
 
@@ -1797,7 +1804,7 @@ CGuildHouse* CGuildManager::GetHouseByID(const GuildHouseIdentifier& ID) const
 
 CGuildHouse* CGuildManager::GetHouseByPos(vec2 Pos) const
 {
-	const auto switchNumber = GS()->Collision()->GetSwitchTileNumberAtIndex(Pos, TILE_SW_HOUSE_ZONE);
+	const auto switchNumber = GS()->Collision()->GetSwitchTileNumberAtTileIndex(Pos, TILE_SW_HOUSE_ZONE);
 	if(!switchNumber)
 		return nullptr;
 
@@ -1811,7 +1818,7 @@ CGuildHouse* CGuildManager::GetHouseByPos(vec2 Pos) const
 
 CFarmzone* CGuildManager::GetHouseFarmzoneByPos(vec2 Pos) const
 {
-	const auto switchNumber = GS()->Collision()->GetSwitchTileNumberAtIndex(Pos, TILE_SW_HOUSE_ZONE);
+	const auto switchNumber = GS()->Collision()->GetSwitchTileNumberAtTileIndex(Pos, TILE_SW_HOUSE_ZONE);
 	if(!switchNumber)
 		return nullptr;
 

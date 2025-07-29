@@ -67,12 +67,28 @@ bool CQuestDescription::HasObjectives(int Step)
 	return m_vObjectives.contains(Step) && m_vObjectives[Step].size() > 0;
 }
 
-void CQuestDescription::PreparePlayerObjectives(int Step, int ClientID, std::deque<std::shared_ptr<CQuestStep>>& pElem)
+void CQuestDescription::PreparePlayerObjectives(int Step, int ClientID, std::deque<CQuestStep*>& pElem)
 {
-	pElem.clear();
-	for(const auto& Step : m_vObjectives[Step])
+	ResetPlayerObjectives(pElem);
+	for(const auto& StepDesc : m_vObjectives[Step])
+		pElem.emplace_back(new CQuestStep(ClientID, StepDesc.m_Bot));
+
+}
+
+void CQuestDescription::ResetPlayerObjectives(std::deque<CQuestStep*>& pElem)
+{
+	if(!pElem.empty())
 	{
-		pElem.emplace_back(std::make_shared<CQuestStep>(ClientID, Step.m_Bot));
+		for(auto* pPtr : pElem)
+		{
+			pPtr->MarkForDestroy();
+			pPtr->Update();
+		}
+
+		for(auto*& pPtr : pElem)
+			delete pPtr;
+
+		pElem.clear();
 	}
 }
 
@@ -93,12 +109,12 @@ CQuestDescription* CPlayerQuest::Info() const
 
 CPlayerQuest::~CPlayerQuest()
 {
-	m_vObjectives.clear();
+	Info()->ResetPlayerObjectives(m_vObjectives);
 }
 
 bool CPlayerQuest::HasUnfinishedObjectives() const
 {
-	return std::ranges::any_of(m_vObjectives, [](const std::shared_ptr<CQuestStep>& pPtr)
+	return std::ranges::any_of(m_vObjectives, [](CQuestStep* pPtr)
 	{
 		return !pPtr->m_StepComplete && pPtr->m_Bot.m_HasAction;
 	});
@@ -116,8 +132,8 @@ bool CPlayerQuest::Accept()
 		return false;
 
 	// initialize
+	SetNewState(QuestState::Accepted);
 	m_Step = 1;
-	m_State = QuestState::Accepted;
 	m_Datafile.Create();
 	Database->Execute<DB::INSERT>("tw_accounts_quests", "(QuestID, UserID, Type) VALUES ('{}', '{}', '{}')", m_ID, pPlayer->Account()->GetID(), (int)m_State);
 
@@ -164,13 +180,9 @@ void CPlayerQuest::Reset()
 	if(!pPlayer)
 		return;
 
+	Info()->ResetPlayerObjectives(m_vObjectives);
 	m_Step = 1;
-	m_State = QuestState::NoAccepted;
-	for(const auto& pStep : m_vObjectives)
-	{
-		pStep->Update();
-	}
-	m_vObjectives.clear();
+	SetNewState(QuestState::NoAccepted);
 	m_Datafile.Delete();
 	Database->Execute<DB::REMOVE>("tw_accounts_quests", "WHERE QuestID = '{}' AND UserID = '{}'", m_ID, pPlayer->Account()->GetID());
 }
@@ -185,13 +197,11 @@ void CPlayerQuest::UpdateStepProgress()
 		return;
 
 	// update step progress
+	Info()->ResetPlayerObjectives(m_vObjectives);
 	m_Step++;
-	m_vObjectives.clear();
-
 	if(Info()->HasObjectives(m_Step))
 	{
 		m_Datafile.Create();
-		Update();
 		return;
 	}
 
@@ -203,42 +213,50 @@ void CPlayerQuest::UpdateStepProgress()
 	GS()->EntityManager()->Text(pPlayer->m_ViewPos + vec2(0, -70), 30, "QUEST COMPLETE");
 	GS()->CreatePlayerSound(m_ClientID, SOUND_GAME_DONE);
 
-	// handle quest by flags
+	// repeatable quest can't got finished state
+	bool CanGotActivityPoints = !Info()->HasFlag(QUEST_FLAG_NO_ACTIVITY_POINT);
 	if(Info()->HasFlag(QUEST_FLAG_TYPE_REPEATABLE))
 	{
-		pPlayer->GetItem(itActivityCoin)->Add(g_Config.m_SvRepeatableActivityCoin);
+		if(CanGotActivityPoints)
+			pPlayer->GetItem(itActivityCoin)->Add(g_Config.m_SvRepeatableActivityCoin);
+
 		GS()->Chat(-1, "{} completed repeatable quest \"{}\".", GS()->Server()->ClientName(m_ClientID), Info()->GetName());
-		Refuse();
+		Reset();
 		return;
 	}
 
 	// daily quest
+	int ActivityPoints = 0;
 	if(Info()->HasFlag(QUEST_FLAG_TYPE_DAILY))
 	{
-		pPlayer->GetItem(itActivityCoin)->Add(g_Config.m_SvDailyActivityCoin);
+		ActivityPoints = g_Config.m_SvDailyActivityCoin;
 		GS()->Chat(-1, "{} completed daily quest \"{}\".", GS()->Server()->ClientName(m_ClientID), Info()->GetName());
 	}
 	// weekly quest
 	else if(Info()->HasFlag(QUEST_FLAG_TYPE_WEEKLY))
 	{
-		pPlayer->GetItem(itActivityCoin)->Add(g_Config.m_SvWeeklyActivityCoin);
+		ActivityPoints = g_Config.m_SvWeeklyActivityCoin;
 		GS()->Chat(-1, "{} completed weekly quest \"{}\".", GS()->Server()->ClientName(m_ClientID), Info()->GetName());
 	}
 	// main quest
 	else if(Info()->HasFlag(QUEST_FLAG_TYPE_MAIN))
 	{
-		pPlayer->GetItem(itActivityCoin)->Add(g_Config.m_SvMainQuestActivityCoin);
+		ActivityPoints = g_Config.m_SvMainQuestActivityCoin;
 		GS()->Chat(-1, "{} completed main quest \"{}\".", GS()->Server()->ClientName(m_ClientID), Info()->GetName());
 	}
 	// side quest
 	else
 	{
-		pPlayer->GetItem(itActivityCoin)->Add(g_Config.m_SvSideQuestActivityCoin);
+		ActivityPoints = g_Config.m_SvSideQuestActivityCoin;
 		GS()->Chat(-1, "{} completed side quest \"{}\".", GS()->Server()->ClientName(m_ClientID), Info()->GetName());
 	}
 
+	// add activity points
+	if(CanGotActivityPoints && ActivityPoints > 0)
+		pPlayer->GetItem(itActivityCoin)->Add(ActivityPoints);
+
 	// update quest state in database
-	m_State = QuestState::Finished;
+	SetNewState(QuestState::Finished);
 	m_Datafile.Delete();
 	Database->Execute<DB::UPDATE>("tw_accounts_quests", "Type = '{}' WHERE QuestID = '{}' AND UserID = '{}'", (int)m_State, m_ID, pPlayer->Account()->GetID());
 
@@ -250,17 +268,25 @@ void CPlayerQuest::UpdateStepProgress()
 void CPlayerQuest::Update()
 {
 	for(const auto& pStep : m_vObjectives)
-	{
 		pStep->Update();
-	}
+
 	UpdateStepProgress();
 }
 
 CQuestStep* CPlayerQuest::GetStepByMob(int MobID)
 {
-	const auto iter = std::ranges::find_if(m_vObjectives, [MobID](const std::shared_ptr<CQuestStep>& Step)
+	auto iter = std::ranges::find_if(m_vObjectives, [MobID](const CQuestStep* pPtr)
 	{
-		return Step->m_Bot.m_ID == MobID;
+		return pPtr->m_Bot.m_ID == MobID;
 	});
-    return iter != m_vObjectives.end() ? iter->get() : nullptr;
+    return iter != m_vObjectives.end() ? *iter : nullptr;
+}
+
+void CPlayerQuest::SetNewState(QuestState State)
+{
+	if(m_State != State)
+	{
+		m_State = State;
+		g_EventListenerManager.Notify<IEventListener::PlayerQuestChangeState>(GetPlayer(), this, State);
+	}
 }

@@ -8,6 +8,7 @@
 #include "eventhandler.h"
 #include "gamecontroller.h"
 #include "gameworld.h"
+#include "multipliers.h"
 #include "playerbot.h"
 
 #include "core/mmo_controller.h"
@@ -36,8 +37,9 @@ class CGS : public IGameServer
 	class CMmoController* m_pMmoController;
 	class CEntityManager* m_pEntityManager;
 	class CPathFinder* m_pPathFinder;
+	class CScenarioPlayerManager* m_pScenarioPlayerManager;
+	class CScenarioGroupManager* m_pScenarioGroupManager;
 
-	int m_MultiplierExp;
 	CPlayer* m_apPlayers[MAX_CLIENTS];
 	CBroadcastState m_aBroadcastStates[MAX_PLAYERS];
 	CCollision m_Collision;
@@ -57,10 +59,13 @@ public:
 	CPathFinder* PathFinder() const { return m_pPathFinder; }
 	CCollision *Collision() { return &m_Collision; }
 	CTuningParams *Tuning() { return &m_Tuning; }
+	CScenarioGroupManager* ScenarioGroupManager() const { return m_pScenarioGroupManager; }
+	CScenarioPlayerManager* ScenarioPlayerManager() const { return m_pScenarioPlayerManager; }
 
 	CEventHandler m_Events;
 	IGameController* m_pController;
 	CGameWorld m_World;
+	Multipliers m_Multipliers;
 
 	CGS();
 	~CGS() override;
@@ -77,19 +82,19 @@ public:
 
 	void CreateFinishEffect(vec2 Pos, int64_t Mask = -1);
 	void CreateBirthdayEffect(vec2 Pos, int64_t Mask = -1);
-	void CreateDamage(vec2 Pos, int FromCID, int Amount, bool CritDamage, float Angle = 0.f, int64_t Mask = -1);
+	void CreateDamage(vec2 Pos, int FromCID, int Amount, float Angle = 0.f, int64_t Mask = -1);
 	void CreateHammerHit(vec2 Pos, int64_t Mask = -1);
-	void CreateRandomRadiusExplosion(int ExplosionCount, float Radius, vec2 Pos, int Owner, int Weapon, int MaxDamage);
-	void CreateCyrcleExplosion(int ExplosionCount, float Radius, vec2 Pos, int Owner, int Weapon, int MaxDamage);
-	void CreateExplosion(vec2 Pos, int Owner, int Weapon, int MaxDamage);
+	void CreateRandomRadiusExplosion(int ExplosionCount, float Radius, vec2 Pos, int Owner, int Weapon, int MaxDamage, int ForceFlag = -1);
+	void CreateCyrcleExplosion(int ExplosionCount, float Radius, vec2 Pos, int Owner, int Weapon, int MaxDamage, int ForceFlag = -1);
+	void CreateExplosion(vec2 Pos, int Owner, int Weapon, int MaxDamage, int ForceFlag = -1);
 	void CreatePlayerSpawn(vec2 Pos, int64_t Mask = -1);
 	void CreateDeath(vec2 Pos, int ClientID, int64_t Mask = -1);
 	void CreateSound(vec2 Pos, int Sound, int64_t Mask = -1);
 	void CreatePlayerSound(int ClientID, int Sound);
 
 	void SnapLaser(int SnappingClient, int ID, const vec2& To, const vec2& From, int StartTick,
-		int LaserType = LASERTYPE_RIFLE, int Subtype = 0, int Owner = -1, int Flags = 0) const;
-	void SnapPickup(int SnappingClient, int ID, const vec2& Pos, int Type = POWERUP_HEALTH, int SubType = 0) const;
+		int LaserType = LASERTYPE_RIFLE, int Subtype = 0, int Owner = -1, int Flags = 0, int SwitchNumber = 0) const;
+	void SnapPickup(int SnappingClient, int ID, const vec2& Pos, int Type = POWERUP_HEALTH, int SubType = 0, int Flags = 0) const;
 	void SnapProjectile(int SnappingClient, int ID, const vec2& Pos, const vec2& Vel, int StartTick,
 		int Type = WEAPON_HAMMER, int Owner = -1, int Flags = 0) const;
 
@@ -114,7 +119,7 @@ public:
 	void OnMessage(int MsgID, CUnpacker *pUnpacker, int ClientID) override;
 	void OnClientConnected(int ClientID) override;
 	void OnClientPrepareChangeWorld(int ClientID) override;
-	void OnClientEnter(int ClientID) override;
+	void OnClientEnter(int ClientID, bool FirstEnter) override;
 	void OnClientDrop(int ClientID, const char *pReason) override;
 	void OnClientDirectInput(int ClientID, void *pInput) override;
 	void OnClientPredictedInput(int ClientID, void *pInput) override;
@@ -135,21 +140,14 @@ public:
 
 	int GetWorldID() const { return m_WorldID; }
 	bool IsWorldType(WorldType Type) const;
-
-	template <typename T> requires std::is_integral_v<T>
-	void ApplyExperienceMultiplier(T* pExperience) const
-	{
-		if(pExperience)
-		{
-			*pExperience = translate_to_percent_rest(*pExperience, (float)m_MultiplierExp);
-		}
-	}
-	bool IsPlayerInWorld(int ClientID, int WorldID = -1) const;
+	bool HasWorldFlag(int64_t Flag) const;
+	bool IsDutyStarted() const;
+	bool IsPlayerInWorld(int ClientID, std::optional<int> WorldIdOpt = std::nullopt) const;
 	bool IsAllowedPVP() const { return m_AllowedPVP; }
 	vec2 GetJailPosition() const { return m_JailPosition; }
 	bool ArePlayersNearby(vec2 Pos, float Distance) const;
 
-	int CreateBot(short BotType, int BotID, int SubID);
+	CPlayerBot* CreateBot(short BotType, int BotID, int SubID);
 	bool TakeItemCharacter(int ClientID);
 	void UpdateVotesIfForAll(int MenuList) const;
 	bool OnClientVoteCommand(int ClientID, const char* pCmd, int Extra1, int Extra2, int ReasonNumber, const char* pReason);
@@ -158,10 +156,9 @@ public:
 
 private:
 	void InitWorld();
-	void HandleNicknameChange(CPlayer* pPlayer, const char* pNewNickname) const;
-
-	void UpdateExpMultiplier();
-	void ResetExpMultiplier();
+	void ProcessNicknameChange(CPlayer* pPlayer, const char* pNewNickname) const;
+	void UpdateWorldMultipliers();
+	void ResetWorldMultipliers();
 
 public:
 	template<typename... Ts> void Chat(int ClientID, const char* pText, const Ts&... args);

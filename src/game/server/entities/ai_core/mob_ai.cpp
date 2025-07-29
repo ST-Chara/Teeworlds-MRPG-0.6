@@ -44,6 +44,24 @@ void CMobAI::OnGiveRandomEffect(int ClientID)
 	}
 }
 
+void CMobAI::OnHandleTunning(CTuningParams* pTuning)
+{
+	// behavior slower
+	if(m_pMobInfo->HasBehaviorFlag(MOBFLAG_BEHAVIOR_SLOWER))
+	{
+		pTuning->m_Gravity = 0.25f;
+		pTuning->m_GroundJumpImpulse = 8.0f;
+		pTuning->m_AirFriction = 0.75f;
+		pTuning->m_AirControlAccel = 1.0f;
+		pTuning->m_AirControlSpeed = 3.75f;
+		pTuning->m_AirJumpImpulse = 8.0f;
+		pTuning->m_HookFireSpeed = 30.0f;
+		pTuning->m_HookDragAccel = 1.5f;
+		pTuning->m_HookDragSpeed = 8.0f;
+		pTuning->m_PlayerHooking = 0;
+	}
+}
+
 void CMobAI::OnRewardPlayer(CPlayer* pPlayer, vec2 Force) const
 {
 	const int ClientID = pPlayer->GetCID();
@@ -55,28 +73,30 @@ void CMobAI::OnRewardPlayer(CPlayer* pPlayer, vec2 Force) const
 	{
 		if(pPlayer->Account()->GetGold() < pPlayer->Account()->GetGoldCapacity())
 		{
-			const int goldGain = calculate_gold_gain(g_Config.m_SvMobKillGoldFactor, PlayerLevel, MobLevel, true);
+			int goldGain = calculate_loot_gain(MobLevel, 3);
+			GS()->m_Multipliers.Apply(Multipliers::GOLD, goldGain);
 
 			if(showMessages)
-			{
 				GS()->Chat(ClientID, "You gained {} gold.", goldGain);
-			}
 
 			pPlayer->Account()->AddGold(goldGain, true);
 		}
 	}
 
+	// grinding materials
+	{
+		const int materialGain = calculate_loot_gain(MobLevel, 10);
+		pPlayer->GetItem(itMaterial)->Add(materialGain);
+	}
+
 	// grinding experience
 	{
-		int expGain = calculate_exp_gain(g_Config.m_SvMobKillExpFactor, PlayerLevel, MobLevel);
+		int expGain = calculate_exp_gain(PlayerLevel, MobLevel);
 		const int expBonusDrop = maximum(expGain / 3, 1);
-
-		GS()->ApplyExperienceMultiplier(&expGain);
+		GS()->m_Multipliers.Apply(Multipliers::EXPERIENCE, expGain);
 
 		if(showMessages)
-		{
 			GS()->Chat(ClientID, "You gained {} exp.", expGain);
-		}
 
 		GS()->EntityManager()->ExpFlyingPoint(m_pCharacter->m_Core.m_Pos, ClientID, expGain, Force);
 		GS()->EntityManager()->DropPickup(m_pCharacter->m_Core.m_Pos, POWERUP_ARMOR, 0, expBonusDrop, (1 + rand() % 2), Force);
@@ -84,7 +104,7 @@ void CMobAI::OnRewardPlayer(CPlayer* pPlayer, vec2 Force) const
 
 	// drop item's
 	{
-		const float ActiveLuckyDrop = clamp((float)pPlayer->GetTotalAttributeValue(AttributeIdentifier::LuckyDropItem) / 100.0f, 0.01f, 10.0f);
+		const auto ActiveLuckyDrop = pPlayer->GetTotalAttributeChance(AttributeIdentifier::LuckyDropItem).value_or(0.f);
 
 		for(int i = 0; i < MAX_DROPPED_FROM_MOBS; i++)
 		{
@@ -100,7 +120,12 @@ void CMobAI::OnRewardPlayer(CPlayer* pPlayer, vec2 Force) const
 			CItem DropItem;
 			DropItem.SetID(DropID);
 			DropItem.SetValue(DropValue);
-			GS()->EntityManager()->RandomDropItem(m_pCharacter->m_Core.m_Pos, ClientID, RandomDrop, DropItem, ForceRandom);
+
+			// currency to inventory or by pickup
+			if(!g_Config.m_SvDropsCurrencyFromMobs && DropItem.Info()->IsGroup(ItemGroup::Currency))
+				pPlayer->GetItem(DropID)->Add(DropValue);
+			else
+				GS()->EntityManager()->RandomDropItem(m_pCharacter->m_Core.m_Pos, ClientID, RandomDrop, DropItem, ForceRandom);
 		}
 	}
 
@@ -144,8 +169,7 @@ void CMobAI::OnTargetRules(float Radius)
 			return !DamageDisabled && (CurrentTotalAttHP < CandidateTotalAttHP);
 		}
 
-		const bool AgressionFactor = GS()->IsWorldType(WorldType::Dungeon) || rand() % 30 == 0;
-		return !DamageDisabled && AgressionFactor;
+		return !DamageDisabled;
 	});
 
 	if(!pPlayer)
@@ -164,17 +188,26 @@ void CMobAI::OnTargetRules(float Radius)
 
 void CMobAI::Process()
 {
-	m_pCharacter->UpdateTarget(1000.f);
-	m_pCharacter->ResetInput();
+	// handle behaviors
+	bool Asleep = false;
+	HandleBehaviors(&Asleep);
+	if(Asleep)
+		return;
 
-	if(const auto* pTargetChar = GS()->GetPlayerChar(m_Target.GetCID()))
+	// update
+	if(!m_BehaviorNeutral)
 	{
-		m_pPlayer->m_TargetPos = pTargetChar->GetPos();
-		m_pCharacter->Fire();
-	}
-	else
-	{
-		m_pPlayer->m_TargetPos.reset();
+		m_pCharacter->UpdateTarget(1000.f);
+
+		if(const auto* pTargetChar = GS()->GetPlayerChar(m_Target.GetCID()))
+		{
+			m_pPlayer->m_TargetPos = pTargetChar->GetPos();
+			m_pCharacter->Fire();
+		}
+		else
+		{
+			m_pPlayer->m_TargetPos.reset();
+		}
 	}
 
 	m_pCharacter->SelectWeaponAtRandomInterval();
@@ -183,6 +216,55 @@ void CMobAI::Process()
 	if(m_pMobInfo->m_Boss)
 	{
 		ShowHealth();
+	}
+}
+
+void CMobAI::HandleBehaviors(bool* pbAsleep)
+{
+	// behavior poisonous
+	if(m_pMobInfo->HasBehaviorFlag(MOBFLAG_BEHAVIOR_POISONOUS) &&
+		(m_BehaviorPoisonedNextTick < Server()->Tick()))
+	{
+		const auto Theta = random_float(0.0f, 2.0f * pi);
+		const auto Distance = 32.f + sqrt(random_float()) * 128.f;
+		const auto RandomPosition = m_pCharacter->m_Core.m_Pos + vec2(Distance * cos(Theta), Distance * sin(Theta));
+
+		// give poison effect
+		if(!GS()->Collision()->CheckPoint(RandomPosition))
+		{
+			const auto vEntities = GS()->m_World.FindEntities(RandomPosition, 64.f, 8, CGameWorld::ENTTYPE_CHARACTER);
+			for(auto* pEnt : vEntities)
+			{
+				auto* pTarget = dynamic_cast<CCharacter*>(pEnt);
+				if(pTarget && pTarget->IsAllowedPVP(m_ClientID))
+				{
+					pTarget->GetPlayer()->m_Effects.Add("Poison", Server()->TickSpeed() * 5);
+				}
+			}
+			GS()->CreateDeath(RandomPosition, m_ClientID);
+		}
+
+		m_BehaviorPoisonedNextTick = Server()->Tick() + (5 + rand() % 40);
+	}
+
+	// behavior neutral
+	m_BehaviorNeutral = false;
+	if(m_pMobInfo->HasBehaviorFlag(MOBFLAG_BEHAVIOR_NEUTRAL) &&
+		(m_pPlayer->m_aPlayerTick[LastDamage] + (Server()->TickSpeed() * 5)) < Server()->Tick())
+	{
+		m_BehaviorNeutral = true;
+	}
+
+	// behavior sleepy
+	if(m_pMobInfo->HasBehaviorFlag(MOBFLAG_BEHAVIOR_SLEEPY) &&
+		(m_pPlayer->m_aPlayerTick[LastDamage] + (Server()->TickSpeed() * 5)) < Server()->Tick())
+	{
+		if(Server()->Tick() % Server()->TickSpeed() == 0)
+		{
+			GS()->SendEmoticon(m_ClientID, EMOTICON_ZZZ);
+			m_pCharacter->SetEmote(EMOTE_BLINK, 2, false);
+		}
+		(*pbAsleep) = true;
 	}
 }
 

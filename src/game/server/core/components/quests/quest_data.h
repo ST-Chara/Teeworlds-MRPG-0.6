@@ -21,6 +21,7 @@ enum
 	QUEST_FLAG_TYPE_REPEATABLE = 1 << 4,
 
 	QUEST_FLAG_CANT_REFUSE = 1 << 5,
+	QUEST_FLAG_NO_ACTIVITY_POINT = 1 << 6,
 
 	QUEST_FLAG_GRANTED_FROM_CHAIN = 1 << 9,
 	QUEST_FLAG_GRANTED_FROM_NPC = 1 << 10,
@@ -101,6 +102,8 @@ public:
 			m_Flags |= QUEST_FLAG_GRANTED_FROM_CHAIN;
 		if(FlagSet.hasSet("Can't refuse"))
 			m_Flags |= QUEST_FLAG_CANT_REFUSE;
+		if(FlagSet.hasSet("No activity point"))
+			m_Flags |= QUEST_FLAG_NO_ACTIVITY_POINT;
 	}
 
 	void AddFlag(int Flag) { m_Flags |= Flag; }
@@ -118,7 +121,8 @@ public:
 
 	bool HasObjectives(int Step);
 
-	void PreparePlayerObjectives(int StepPos, int ClientID, std::deque<std::shared_ptr<CQuestStep>>& pElem);
+	void PreparePlayerObjectives(int Step, int ClientID, std::deque<CQuestStep*>& pElem);
+	void ResetPlayerObjectives(std::deque<CQuestStep*>& pElem);
 
 	bool CanBeGrantedByChain() const { return HasFlag(QUEST_FLAG_GRANTED_FROM_CHAIN); }
 	bool CanBeGrantedByNPC() const { return HasFlag(QUEST_FLAG_GRANTED_FROM_NPC); }
@@ -142,11 +146,10 @@ class CPlayerQuest : public MultiworldIdentifiableData< std::map < int, std::map
 	QuestIdentifier m_ID {};
 	QuestState m_State {};
 	int m_Step {};
-	std::deque<std::shared_ptr<CQuestStep>> m_vObjectives {};
+	std::deque<CQuestStep*> m_vObjectives {};
 	QuestDatafile m_Datafile {};
 
 public:
-
 	CPlayerQuest(QuestIdentifier ID, int ClientID) : m_ClientID(ClientID), m_Step(1) { m_ID = ID; }
 	~CPlayerQuest();
 
@@ -181,6 +184,7 @@ public:
 
 private:
 	void UpdateStepProgress();
+	void SetNewState(QuestState State);
 };
 
 

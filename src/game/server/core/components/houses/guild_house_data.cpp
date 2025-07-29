@@ -44,6 +44,11 @@ void CGuildHouse::InitComponents(const std::string& DoorsData, const std::string
 	dbg_assert(m_pDoorManager != nullptr, "The house doors manager is null");
 }
 
+int CGuildHouse::GetMaxDecorationSlots() const
+{
+	return m_pGuild ? m_pGuild->GetUpgrades().getRef<int>((int)GuildUpgrade::DecorationSlots) : 0;
+}
+
 int CGuildHouse::GetRentPrice() const
 {
 	const auto DoorCount = (int)GetDoorManager()->GetContainer().size();
@@ -56,7 +61,7 @@ int CGuildHouse::GetRentPrice() const
 const char* CGuildHouse::GetOwnerName() const
 {
 	if(!m_pGuild)
-		return "FREE GUILD HOUSE";
+		return "FREE";
 	return m_pGuild->GetName();
 }
 
@@ -80,7 +85,7 @@ bool CGuildHouse::ExtendRentDays(int Days)
 bool CGuildHouse::ReduceRentDays(int Days)
 {
 	// check validity
-	if(!m_pGuild || !m_pGuild->GetBankManager() || m_RentDays <= 0)
+	if(!m_pGuild || !m_pGuild->GetBankManager() || m_RentDays < Days)
 		return false;
 
 	// reduce rent days
@@ -92,7 +97,7 @@ bool CGuildHouse::ReduceRentDays(int Days)
 void CGuildHouse::UpdateText(int Lifetime) const
 {
 	// update text
-	const char* pName = IsPurchased() ? m_pGuild->GetName() : "FREE GUILD HOUSE";
+	const char* pName = IsPurchased() ? m_pGuild->GetName() : "FREE";
 	GS()->EntityManager()->Text(m_TextPosition, Lifetime - 5, pName);
 }
 

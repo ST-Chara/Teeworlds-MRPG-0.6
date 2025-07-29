@@ -1,4 +1,6 @@
+#include "get_valid_ai_util.h"
 #include "npc_ai.h"
+#include "mob_ai.h"
 
 #include <game/server/entities/character_bot.h>
 #include <game/server/gamecontext.h>
@@ -13,7 +15,10 @@ bool CNpcAI::CanDamage(CPlayer* pFrom)
 		if(pFrom->IsBot())
 		{
 			auto* pFromBot = dynamic_cast<CPlayerBot*>(pFrom);
-			return pFromBot->GetBotType() == TYPE_BOT_MOB;
+			if(auto* pMobAI = GetValidAI<CMobAI>(pFromBot))
+				return pMobAI && !pMobAI->IsNeutral();
+
+			return false;
 		}
 
 		return pFrom->Account()->IsCrimeMaxedOut();
@@ -108,7 +113,6 @@ void CNpcAI::ProcessGuardianNPC() const
 	{
 		m_pCharacter->UpdateTarget(800.0f);
 	}
-	m_pCharacter->ResetInput();
 
 	if(const auto* pTargetChar = GS()->GetPlayerChar(m_Target.GetCID()))
 	{
@@ -151,7 +155,7 @@ void CNpcAI::ProcessDefaultNPC()
 	{
 		const int CandidateCID = pCandidate->GetCID();
 
-		if(m_pPlayer->IsActive() && m_pPlayer->IsActiveForClient(CandidateCID))
+		if(m_pPlayer->IsActive() && m_pPlayer->IsActiveForClient(CandidateCID) != ESnappingPriority::None)
 		{
 			const vec2& CandidatePos = pCandidate->GetCharacter()->m_Core.m_Pos;
 			const vec2& SelfPos = m_pCharacter->m_Core.m_Pos;

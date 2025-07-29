@@ -3,23 +3,24 @@
 #include "player.h"
 
 #include "gamecontext.h"
-#include "worldmodes/dungeon.h"
+#include "worldmodes/dungeon/dungeon.h"
 
 #include "core/components/accounts/account_manager.h"
 #include "core/components/achievements/achievement_manager.h"
 #include "core/components/Bots/BotManager.h"
-#include "core/components/dungeons/dungeon_data.h"
+#include "core/components/duties/dungeon_data.h"
 #include "core/components/Eidolons/EidolonInfoData.h"
 #include "core/components/guilds/guild_manager.h"
 #include "core/components/quests/quest_manager.h"
 
-#include "core/components/Inventory/ItemData.h"
+#include "core/components/inventory/item_data.h"
 #include "core/components/skills/skill_data.h"
 #include "core/components/groups/group_data.h"
 #include "core/components/worlds/world_data.h"
 
 #include "core/tools/vote_optional.h"
 #include "core/scenarios/scenario_universal.h"
+#include "core/tools/scenario_player_manager.h"
 
 MACRO_ALLOC_POOL_ID_IMPL(CPlayer, MAX_CLIENTS * ENGINE_MAX_WORLDS + MAX_CLIENTS)
 
@@ -29,12 +30,16 @@ CPlayer::CPlayer(CGS* pGS, int ClientID) : m_pGS(pGS), m_ClientID(ClientID)
 {
 	m_aPlayerTick[Die] = Server()->Tick();
 	m_aPlayerTick[Respawn] = Server()->Tick() + Server()->TickSpeed();
-	m_SnapHealthNicknameTick = 0;
+	m_ShowHealthNicknameTick = 0;
 
 	m_WantSpawn = true;
+	m_Afk = false;
+	m_pLastInput = new CNetObj_PlayerInput({ 0 });
+	m_LastInputInit = false;
+	m_LastPlaytime = 0;
+	m_MoodState = Mood::Normal;
 	m_PrevTuningParams = *pGS->Tuning();
 	m_NextTuningParams = m_PrevTuningParams;
-	m_Scenarios.Init(ClientID);
 	m_Cooldown.Init(ClientID);
 	m_VotesData.Init(m_pGS, this);
 	m_Dialog.Init(this);
@@ -42,13 +47,7 @@ CPlayer::CPlayer(CGS* pGS, int ClientID) : m_pGS(pGS), m_ClientID(ClientID)
 	// constructor only for players
 	if(m_ClientID < MAX_PLAYERS)
 	{
-		m_MoodState = Mood::Normal;
 		GS()->SendTuningParams(ClientID);
-
-		m_Afk = false;
-		m_pLastInput = new CNetObj_PlayerInput({ 0 });
-		m_LastInputInit = false;
-		m_LastPlaytime = 0;
 	}
 }
 
@@ -71,7 +70,7 @@ void CPlayer::GetFormatedName(char* aBuffer, int BufferSize)
 	const auto tickSpeed = Server()->TickSpeed();
 
 	// Player is not chatting and health nickname tick is valid
-	if(!isChatting && currentTick < m_SnapHealthNicknameTick)
+	if(!isChatting && currentTick < m_ShowHealthNicknameTick)
 	{
 		char aHealthProgressBuf[6];
 		char aNicknameBuf[MAX_NAME_LENGTH];
@@ -147,7 +146,6 @@ void CPlayer::Tick()
 
 	// update events
 	m_FixedView.Tick(m_ViewPos);
-	m_Scenarios.Tick();
 	m_Cooldown.Tick();
 	if(m_pMotdMenu)
 	{
@@ -172,7 +170,7 @@ void CPlayer::PostTick()
 	{
 		// update latency value
 		if(Server()->ClientIngame(m_ClientID))
-			GetTempData().m_TempPing = m_Latency.m_Min;
+			GetSharedData().m_Ping = m_Latency.m_Min;
 
 		// handlers
 		HandleTuningParams();
@@ -180,7 +178,24 @@ void CPlayer::PostTick()
 		Account()->GetBonusManager().PostTick();
 		Account()->GetPrisonManager().PostTick();
 		m_Effects.PostTick();
-		m_Scenarios.PostTick();
+	}
+
+	// update view pos for spectators
+	const bool isViewLocked = m_FixedView.GetCurrentView().has_value();
+	const auto spectatorID = Server()->GetSpectatorID(m_ClientID);
+	if(!isViewLocked && GetTeam() == TEAM_SPECTATORS && spectatorID != SPEC_FREEVIEW)
+	{
+		auto* pSpecPlayer = GS()->GetPlayer(spectatorID);
+		if(pSpecPlayer)
+		{
+			if(pSpecPlayer->GetCharacter())
+				m_ViewPos = pSpecPlayer->GetCharacter()->GetPos();
+			else if(Server()->ClientIngame(spectatorID) &&
+					Server()->GetClientWorldID(spectatorID) != Server()->GetClientWorldID(m_ClientID))
+				ChangeWorld(Server()->GetClientWorldID(spectatorID));
+		}
+		else
+			Server()->SetSpectatorID(m_ClientID, SPEC_FREEVIEW);
 	}
 
 	// handlers
@@ -207,20 +222,17 @@ void CPlayer::TryCreateEidolon()
 		return;
 
 	// check valid equppied item id
-	const auto eidolonItemID = GetEquippedItemID(ItemType::EquipEidolon);
+	const auto eidolonItemID = GetEquippedSlotItemID(ItemType::EquipEidolon);
 	if(!eidolonItemID.has_value())
 		return;
 
 	// try to create eidolon
 	if(const auto* pEidolonData = GS()->GetEidolonByItemID(eidolonItemID.value()))
 	{
-		if(int eidolonCID = GS()->CreateBot(TYPE_BOT_EIDOLON, pEidolonData->GetDataBotID(), m_ClientID); eidolonCID != -1)
+		if(auto pPlayerEidolon = GS()->CreateBot(TYPE_BOT_EIDOLON, pEidolonData->GetDataBotID(), m_ClientID))
 		{
-			if(auto* pEidolonPlayer = dynamic_cast<CPlayerBot*>(GS()->GetPlayer(eidolonCID)))
-			{
-				pEidolonPlayer->m_EidolonItemID = eidolonItemID.value();
-				m_EidolonCID = eidolonCID;
-			}
+			pPlayerEidolon->m_EidolonItemID = eidolonItemID.value();
+			m_EidolonCID = pPlayerEidolon->GetCID();
 		}
 	}
 }
@@ -322,7 +334,7 @@ void CPlayer::Snap(int SnappingClient)
 		pPlayerInfo->m_Local = localClient;
 		pPlayerInfo->m_ClientId = m_ClientID;
 		pPlayerInfo->m_Team = GetTeam();
-		pPlayerInfo->m_Latency = (SnappingClient == -1 ? m_Latency.m_Min : GetTempData().m_TempPing);
+		pPlayerInfo->m_Latency = (SnappingClient == -1 ? m_Latency.m_Min : GetSharedData().m_Ping);
 		pPlayerInfo->m_Score = Account()->GetLevel();
 
 		// ddnet player
@@ -337,9 +349,9 @@ void CPlayer::Snap(int SnappingClient)
 		{
 			if(auto* pSpectatorInfo = Server()->SnapNewItem<CNetObj_SpectatorInfo>(m_ClientID))
 			{
+				pSpectatorInfo->m_SpectatorId = (isViewLocked ? m_ClientID : Server()->GetSpectatorID(m_ClientID));
 				pSpectatorInfo->m_X = m_ViewPos.x;
 				pSpectatorInfo->m_Y = m_ViewPos.y;
-				pSpectatorInfo->m_SpectatorId = (isViewLocked ? m_ClientID : -1);
 				m_FixedView.Reset();
 			}
 
@@ -379,7 +391,7 @@ void CPlayer::FakeSnap()
 	// spectator info
 	if(auto* pSpectatorInfo = Server()->SnapNewItem<CNetObj_SpectatorInfo>(FakeID))
 	{
-		pSpectatorInfo->m_SpectatorId = -1;
+		pSpectatorInfo->m_SpectatorId = Server()->GetSpectatorID(FakeID);
 		pSpectatorInfo->m_X = m_ViewPos.x;
 		pSpectatorInfo->m_Y = m_ViewPos.y;
 	}
@@ -405,7 +417,7 @@ void CPlayer::RefreshClanTagString()
 	prepared += fmt_default(" | {}", Server()->GetWorldName(GetCurrentWorldID()));
 
 	// title
-	if(const auto titleItemID = GetEquippedItemID(ItemType::EquipTitle); titleItemID.has_value())
+	if(const auto titleItemID = GetEquippedSlotItemID(ItemType::EquipTitle))
 		prepared += fmt_default(" | {}", GetItem(titleItemID.value())->Info()->GetName());
 
 	// guild
@@ -442,7 +454,7 @@ void CPlayer::TryRespawn()
 	}
 
 	// spawn by kill
-	else if(GetTempData().m_LastKilledByWeapon != WEAPON_WORLD)
+	else if(GetSharedData().m_LastKilledByWeapon != WEAPON_WORLD)
 	{
 		auto* pRespawnWorld = GS()->GetWorldData()->GetRespawnWorld();
 		if(pRespawnWorld && !GS()->IsPlayerInWorld(m_ClientID, pRespawnWorld->GetID()))
@@ -455,7 +467,7 @@ void CPlayer::TryRespawn()
 	// spawn by optional teleport
 	else if(!GS()->IsWorldType(WorldType::Dungeon))
 	{
-		auto optionalSpawnPos = GetTempData().GetSpawnPosition();
+		auto optionalSpawnPos = GetSharedData().GetSpawnPosition();
 		if(optionalSpawnPos.has_value() && !GS()->Collision()->CheckPoint(*optionalSpawnPos))
 			FinalSpawnPos = optionalSpawnPos;
 	}
@@ -477,7 +489,7 @@ void CPlayer::TryRespawn()
 		m_pCharacter = new(AllocMemoryCell) CCharacter(&GS()->m_World);
 		m_pCharacter->Spawn(this, *FinalSpawnPos);
 		GS()->CreatePlayerSpawn(*FinalSpawnPos);
-		GetTempData().ClearSpawnPosition();
+		GetSharedData().ClearSpawnPosition();
 		m_WantSpawn = false;
 	}
 }
@@ -500,7 +512,7 @@ void CPlayer::OnDisconnect()
 void CPlayer::OnDirectInput(CNetObj_PlayerInput* pNewInput)
 {
 	// Update view position for spectators
-	if(!m_pCharacter && GetTeam() == TEAM_SPECTATORS)
+	if(!m_pCharacter && GetTeam() == TEAM_SPECTATORS && Server()->GetSpectatorID(m_ClientID) == SPEC_FREEVIEW)
 		m_ViewPos = vec2(pNewInput->m_TargetX, pNewInput->m_TargetY);
 
 	// parse event keys
@@ -514,13 +526,16 @@ void CPlayer::OnDirectInput(CNetObj_PlayerInput* pNewInput)
 	// Reset input when chatting
 	if(pNewInput->m_PlayerFlags & PLAYERFLAG_CHATTING)
 	{
-		if(m_PlayerFlags & PLAYERFLAG_CHATTING)
-			return;
+		if(!(m_PlayerFlags & PLAYERFLAG_CHATTING))
+		{
+			if(m_pCharacter)
+				m_pCharacter->ResetInput();
 
-		if(m_pCharacter)
-			m_pCharacter->ResetInput();
+			m_PlayerFlags = pNewInput->m_PlayerFlags;
+		}
 
-		m_PlayerFlags = pNewInput->m_PlayerFlags;
+		// hidden broadcast priority
+		GS()->Broadcast(m_ClientID, BroadcastPriority::HiddenBroadcast, 100, "");
 		return;
 	}
 
@@ -572,7 +587,7 @@ void CPlayer::ProgressBar(const char* pType, int Level, uint64_t Exp, uint64_t E
 	// send and format
 	const auto ProgressBar = mystd::string::progressBar(100, static_cast<int>(ExpProgress), 10, ":", " ");
 	const auto Result = fmt_default("Lv{lv} {type}[{bar}] {~.2}%+{~.3}%({})XP", Level, pType, ProgressBar, ExpProgress, GainedExpProgress, GainedExp);
-	GS()->Broadcast(m_ClientID, BroadcastPriority::GameInformation, 100, Result.c_str());
+	GS()->Broadcast(m_ClientID, BroadcastPriority::GamePriority, 100, Result.c_str());
 }
 
 /* #########################################################################
@@ -583,33 +598,36 @@ const char* CPlayer::GetLanguage() const
 	return Server()->GetClientLanguage(m_ClientID);
 }
 
-void CPlayer::UpdateTempData(int Health, int Mana)
+void CPlayer::UpdateSharedCharacterData(int Health, int Mana)
 {
-	auto& TempData = GetTempData();
-	TempData.m_TempHealth = Health;
-	TempData.m_TempMana = Mana;
+	auto& TempData = GetSharedData();
+	TempData.m_Health = Health;
+	TempData.m_Mana = Mana;
+}
+
+int CPlayer::GetTotalAttributeValue(AttributeIdentifier AttributeID) const
+{
+	return m_aStats.contains(AttributeID) ? m_aStats.at(AttributeID) : 0;
 }
 
 bool CPlayer::IsAuthed() const
 {
-	const auto* pAccountManager = GS()->Core()->AccountManager();
-	if(pAccountManager->IsActive(m_ClientID))
-	{
+	if(CAccountManager::IsActive(m_ClientID))
 		return Account()->GetID() > 0;
-	}
 	return false;
 }
 
+
 int CPlayer::GetMaxHealth() const
 {
-	auto DefaultHP = 10 + GetTotalAttributeValue(AttributeIdentifier::HP);
+	auto DefaultHP = DEFAULT_BASE_HP + GetTotalAttributeValue(AttributeIdentifier::HP);
 	Account()->GetBonusManager().ApplyBonuses(BONUS_TYPE_HP, &DefaultHP);
 	return DefaultHP;
 }
 
 int CPlayer::GetMaxMana() const
 {
-	auto DefaultMP = 10 + GetTotalAttributeValue(AttributeIdentifier::MP);
+	auto DefaultMP = DEFAULT_BASE_MP + GetTotalAttributeValue(AttributeIdentifier::MP);
 	Account()->GetBonusManager().ApplyBonuses(BONUS_TYPE_MP, &DefaultMP);
 	return DefaultMP;
 }
@@ -634,7 +652,7 @@ void CPlayer::FormatBroadcastBasicStats(char* pBuffer, int Size, const char* pAp
 	const auto Bank = Account()->GetBankManager();
 	const auto Gold = Account()->GetGold();
 	const auto GoldCapacity = Account()->GetGoldCapacity();
-	const auto [BonusActivitiesLines, BonusActivitiesStr] = Account()->GetBonusManager().GetBonusActivitiesString();
+	const auto BonusActivitiesStr = Account()->GetBonusManager().GetBonusActivitiesString();
 
 	// result
 	auto Result = fmt_localize(m_ClientID, "\n\n\n\n\nLv{}[{}]\nHP {$}/{$}\nMP {$}/{$}\nGold {$} of {$}\nBank {$}",
@@ -656,11 +674,13 @@ void CPlayer::FormatBroadcastBasicStats(char* pBuffer, int Size, const char* pAp
 		Result += "\n" + fmt_localize(m_ClientID, "Potion MP recast: {}", Seconds);
 	}
 
+	// bonus activities info
 	if(!BonusActivitiesStr.empty())
 	{
 		Result += "\n" + BonusActivitiesStr;
 	}
 
+	// normalize lines
 	constexpr int MaxLines = 20;
 	const auto Lines = std::ranges::count(Result, '\n');
 	if(Lines < MaxLines)
@@ -696,12 +716,12 @@ bool CPlayer::ParseVoteOptionResult(int Vote)
 		// dungeon change ready state
 		if(GS()->IsWorldType(WorldType::Dungeon))
 		{
-			//const int DungeonID = dynamic_cast<CGameControllerDungeon*>(GS()->m_pController)->GetDungeonID();
-			//if(!CDungeonData::ms_aDungeon[DungeonID].IsDungeonPlaying())
-			//{
-			//	GetTempData().m_TempDungeonReady = !GetTempData().m_TempDungeonReady;
-			//	GS()->Chat(m_ClientID, "You changed the ready mode to \"{}\"!", GetTempData().m_TempDungeonReady ? "ready" : "not ready");
-			//}
+			auto* pController = dynamic_cast<CGameControllerDungeon*>(GS()->m_pController);
+			if(!pController || !pController->GetDungeon() || pController->GetDungeon()->IsPlaying())
+				return false;
+
+			GetSharedData().m_TempDungeonReady = !GetSharedData().m_TempDungeonReady;
+			GS()->Chat(m_ClientID, "You changed the ready mode to \"{}\"!", GetSharedData().m_TempDungeonReady ? "ready" : "not ready");
 			return true;
 		}
 	}
@@ -764,145 +784,112 @@ CPlayerQuest* CPlayer::GetQuest(QuestIdentifier ID) const
 	return questData[ID];
 }
 
-std::optional<int> CPlayer::GetEquippedItemID(ItemType EquipType, int SkipItemID) const
+std::optional<int> CPlayer::GetEquippedSlotItemID(ItemType EquipType) const
 {
-	const auto& playerItems = CPlayerItem::Data()[m_ClientID];
-	for(const auto& [itemID, item] : playerItems)
-	{
-		if(itemID == SkipItemID)
-			continue;
-
-		if(!item.HasItem())
-			continue;
-
-		if(!item.IsEquipped())
-			continue;
-
-		if(!item.Info()->IsType(EquipType))
-			continue;
-
-		return itemID;
-	}
-
-	return std::nullopt;
+	return Account()->GetEquippedSlotItemID(EquipType);
 }
 
-bool CPlayer::IsEquipped(ItemType EquipID) const
+bool CPlayer::IsEquippedSlot(ItemType EquipID) const
 {
-	const auto& optItemID = GetEquippedItemID(EquipID, -1);
-	return optItemID.has_value();
+	const auto& ItemIdOpt = GetEquippedSlotItemID(EquipID);
+	return ItemIdOpt.has_value();
 }
 
-int CPlayer::GetTotalAttributeValue(AttributeIdentifier ID) const
+
+int CPlayer::GetTotalRawAttributeValue(AttributeIdentifier ID) const
 {
-	// initialize variables
-	const auto* pAtt = GS()->GetAttributeInfo(ID);
-
-	// check if the player is in a dungeon and the attribute has a low improvement cost
-	if(GS()->IsWorldType(WorldType::Dungeon))
-	{
-		//const auto* pDungeon = dynamic_cast<const CGameControllerDungeon*>(GS()->m_pController);
-		//if(pAtt->GetUpgradePrice() < 4 && CDungeonData::ms_aDungeon[pDungeon->GetDungeonID()].IsDungeonPlaying())
-		//{
-		//	return pDungeon->GetAttributeDungeonSyncByClass(Account()->GetActiveProfessionID(), ID);
-		//}
-	}
-
-	// counting attributes from equipped items
 	int totalValue = 0;
-	for(const auto& [ItemID, PlayerItem] : CPlayerItem::Data()[m_ClientID])
-	{
-		// required repair
-		if(PlayerItem.GetDurability() <= 0)
-			continue;
 
-		// if is equipped and enchantable add attribute
-		if(PlayerItem.IsEquipped() && PlayerItem.Info()->IsEnchantable())
+	// counting by modules
+	const auto& vPlayerItems = CPlayerItem::Data()[m_ClientID];
+	for(const auto& [ItemID, PlayerItem] : vPlayerItems)
+	{
+		if(PlayerItem.HasItem() && PlayerItem.Info()->HasAttributes() && PlayerItem.GetDurability() > 0 &&
+			 PlayerItem.Info()->IsEquipmentModules() && PlayerItem.IsEquipped())
 		{
-			totalValue += PlayerItem.GetEnchantStats(ID);
+			totalValue += PlayerItem.GetEnchantAttributeValue(ID);
 		}
 	}
 
-	// add attribute for other profession
-	for(const auto& Prof : Account()->GetProfessions())
+	// lamba for counting by equipment slots
+	auto addItemEnchantStats = [&](const std::optional<int>& ItemIdOpt) mutable
 	{
-		if(Prof.IsProfessionType(PROFESSION_TYPE_OTHER))
-			totalValue += Prof.GetAttributeValue(ID);
+		if(ItemIdOpt && vPlayerItems.contains(*ItemIdOpt))
+		{
+			auto& PlayerItem = vPlayerItems.at(*ItemIdOpt);
+			if(PlayerItem.HasItem() && PlayerItem.Info()->HasAttributes() && PlayerItem.GetDurability() > 0 &&
+				PlayerItem.Info()->IsEquipmentSlot())
+			{
+				totalValue += PlayerItem.GetEnchantAttributeValue(ID);
+			}
+		}
+	};
+
+	// counting by shared equipment slots
+	for(const auto& [Type, ItemIdOpt] : Account()->GetEquippedSlots().getSlots())
+		addItemEnchantStats(ItemIdOpt);
+
+	// counting by active profession
+	auto* pActiveProfession = Account()->GetActiveProfession();
+	if(pActiveProfession)
+	{
+		for(const auto& [Type, ItemIdOpt] : pActiveProfession->GetEquippedSlots().getSlots())
+			addItemEnchantStats(ItemIdOpt);
+
+		totalValue += pActiveProfession->GetAttributeValue(ID);
+		totalValue += std::max(1, translate_to_percent_rest(totalValue, pActiveProfession->GetAmplifier(ID)));
 	}
 
-	// add attribute for active profession
-	if(const auto* pClassProf = Account()->GetActiveProfession())
+	// counting by other professions
+	for(auto& Prof : Account()->GetProfessions())
 	{
-		totalValue += pClassProf->GetAttributeValue(ID);
-		totalValue += translate_to_percent_rest(totalValue, pClassProf->GetExtraBoostAttribute(ID));
+		if(Prof.IsProfessionType(PROFESSION_TYPE_OTHER))
+		{
+			for(const auto& [Type, ItemIdOpt] : Prof.GetEquippedSlots().getSlots())
+				addItemEnchantStats(ItemIdOpt);
+
+			totalValue += Prof.GetAttributeValue(ID);
+		}
 	}
 
 	return totalValue;
 }
 
-float CPlayer::GetAttributeChance(AttributeIdentifier ID) const
+std::optional<float> CPlayer::GetTotalAttributeChance(AttributeIdentifier ID) const
 {
-	// use a lambda to calculate chance
-	int attributeValue = GetTotalAttributeValue(ID);
-	auto calculateChance = [attributeValue](float base, float multiplier, float max)
-	{
-		return std::min(base + static_cast<float>(attributeValue) * multiplier, max);
-	};
+	// collect chance sum
+	int totalValue = GetTotalAttributeValue(ID);
+	auto Result = CAttributeDescription::CalculateChance(ID, totalValue);
+	if(!Result)
+		return std::nullopt;
 
-	// chance
+	// prepare result
+	float max = 0.0f;
+	float base = 0.0f;
 	switch(ID)
 	{
-		case AttributeIdentifier::Vampirism:
-		case AttributeIdentifier::Crit:
-			return calculateChance(8.0f, 0.0015f, 30.0f);
-
-		case AttributeIdentifier::Lucky:
-			return calculateChance(5.0f, 0.0015f, 20.0f);
-
-		default:
-			return 0.f;
-	}
-}
-
-int CPlayer::GetTotalAttributesInGroup(AttributeGroup Type) const
-{
-	int totalSize = 0;
-
-	// iterate over all attributes by group and sum their values
-	for(const auto& [ID, pAttribute] : CAttributeDescription::Data())
-	{
-		if(pAttribute->IsGroup(Type))
-		{
-			totalSize += GetTotalAttributeValue(ID);
-		}
-	}
-	return totalSize;
-}
-
-int CPlayer::GetTotalAttributes() const
-{
-	int totalSize = 0;
-
-	// iterate over all attributes and sum their values
-	for(const auto& attributeID : CAttributeDescription::Data() | std::views::keys)
-	{
-		totalSize += GetTotalAttributeValue(attributeID);
+		case AttributeIdentifier::AttackSPD: base = 100.f; max = MAX_PERCENT_ATTRIBUTE_ATTACK_SPEED; break;
+		case AttributeIdentifier::AmmoRegen: base = 100.f; max = MAX_PERCENT_ATTRIBUTE_AMMO_REGEN; break;
+		case AttributeIdentifier::Vampirism: base = 5.0f; max = MAX_PERCENT_ATTRIBUTE_VAMPIRISM; break;
+		case AttributeIdentifier::Crit: base = 5.0f; max = MAX_PERCENT_ATTRIBUTE_CRIT_CHANCE; break;
+		case AttributeIdentifier::Lucky: base = 5.0f; max = MAX_PERCENT_ATTRIBUTE_LUCKY; break;
+		case AttributeIdentifier::LuckyDropItem: base = 0.0f; max = MAX_PERCENT_ATTRIBUTE_LUCKY_DROP; break;
+		default: base = 0.f;
 	}
 
-	return totalSize;
+	return std::min(base + (*Result), max);
 }
 
-void CPlayer::SetSnapHealthTick(int Sec)
+void CPlayer::ShowHealthNickname(int Sec)
 {
-	m_SnapHealthNicknameTick = Server()->Tick() + (Server()->TickSpeed() * Sec);
+	m_ShowHealthNicknameTick = Server()->Tick() + (Server()->TickSpeed() * Sec);
 }
 
-void CPlayer::ChangeWorld(int WorldID, std::optional<vec2> newWorldPosition) const
+void CPlayer::ChangeWorld(int WorldID, std::optional<vec2> newWorldPosition)
 {
 	// reset dungeon temporary data
-	auto& tempData = GetTempData();
+	auto& tempData = GetSharedData();
 	tempData.m_TempDungeonReady = false;
-	tempData.m_TempTimeDungeon = 0;
 
 	// if new position is provided, set the teleport position
 	if(newWorldPosition.has_value())
@@ -947,6 +934,9 @@ void CPlayer::StartUniversalScenario(const std::string& ScenarioData, int Scenar
 
 		// start scenario
 		const auto& scenarioJsonData = ObjElem.empty() ? pJson : pJson[ObjElem];
-		Scenarios().Start(std::make_unique<CUniversalScenario>(ScenarioID, scenarioJsonData));
+		if(!scenarioJsonData.empty())
+		{
+			GS()->ScenarioPlayerManager()->RegisterScenario<CUniversalScenario>(m_ClientID, scenarioJsonData);
+		}
 	});
 }

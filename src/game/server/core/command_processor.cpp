@@ -7,7 +7,21 @@
 #include <game/server/core/components/groups/group_manager.h>
 
 #include "components/houses/entities/house_door.h"
-#include "game/server/gamecontext.h"
+#include <game/server/gamecontext.h>
+
+static bool is_valid_player(CGS* pGS, CPlayer* pPlayer, bool RequiredAuth)
+{
+	if(!pPlayer || !pGS)
+		return false;
+
+	if(RequiredAuth && !pPlayer->IsAuthed())
+	{
+		pGS->Chat(pPlayer->GetCID(), "You must be logged in to use the command.");
+		return false;
+	}
+
+	return true;
+}
 
 CCommandProcessor::CCommandProcessor(CGS* pGS)
 {
@@ -17,6 +31,11 @@ CCommandProcessor::CCommandProcessor(CGS* pGS)
 	IServer* pServer = m_pGS->Server();
 	AddCommand("login", "s[username] s[password]", ConChatLogin, pServer, "User login (authentication)");
 	AddCommand("register", "s[username] s[password]", ConChatRegister, pServer, "Register a new account");
+
+	AddCommand("change_password", "s[old_password] s[new_password] ?s[pin]", ConChatChangePassword, pServer, "Change account password");
+
+	AddCommand("set_pin", "s[password] s[new_pin]", ConChatSetPin, pServer, "Set pincode account");
+	AddCommand("change_pin", "s[old_pin] s[new_pin]", ConChatChangePin, pServer, "Change pincode account");
 
 	// game commands
 	AddCommand("group", "?s[element] ?s[post]", ConGroup, pServer, "Manage group settings");
@@ -30,7 +49,7 @@ CCommandProcessor::CCommandProcessor(CGS* pGS)
 	AddCommand("cmdlist", "?i[page]", ConChatCmdList, pServer, "Display the list of available commands");
 	AddCommand("help", "", ConChatCmdList, pServer, "Get help on commands");
 	AddCommand("rules", "", ConChatRules, pServer, "View game rules");
-	AddCommand("info", "", ConChatWiki, pServer, "Game information/wiki");
+	AddCommand("info", "", ConChatInfo, pServer, "Game information/wiki");
 	AddCommand("wiki", "", ConChatWiki, pServer, "Game information/wiki");
 	AddCommand("bonuses", "", ConChatBonuses, pServer, "Information on bonuses");
 }
@@ -44,6 +63,49 @@ static CGS* GetCommandResultGameServer(int ClientID, void* pUser)
 {
 	IServer* pServer = (IServer*)pUser;
 	return (CGS*)pServer->GameServer(pServer->GetClientWorldID(ClientID));
+}
+
+void CCommandProcessor::ConChatSetPin(IConsole::IResult* pResult, void* pUser)
+{
+	const int ClientID = pResult->GetClientID();
+	auto* pGS = GetCommandResultGameServer(ClientID, pUser);
+	auto* pPlayer = pGS->GetPlayer(ClientID);
+
+	if(pPlayer)
+	{
+		const char* pPinOrPassword = pResult->GetString(0);
+		const char* pNewPincode = pResult->GetString(1);
+		pGS->Core()->AccountManager()->SetPinCode(ClientID, pPinOrPassword, pNewPincode, false);
+	}
+}
+
+void CCommandProcessor::ConChatChangePin(IConsole::IResult* pResult, void* pUser)
+{
+	const int ClientID = pResult->GetClientID();
+	auto* pGS = GetCommandResultGameServer(ClientID, pUser);
+	auto* pPlayer = pGS->GetPlayer(ClientID);
+
+	if(pPlayer)
+	{
+		const char* pPinOrPassword = pResult->GetString(0);
+		const char* pNewPincode = pResult->GetString(1);
+		pGS->Core()->AccountManager()->SetPinCode(ClientID, pPinOrPassword, pNewPincode, true);
+	}
+}
+
+void CCommandProcessor::ConChatChangePassword(IConsole::IResult* pResult, void* pUser)
+{
+	const int ClientID = pResult->GetClientID();
+	auto* pGS = GetCommandResultGameServer(ClientID, pUser);
+	auto* pPlayer = pGS->GetPlayer(ClientID);
+
+	if(pPlayer)
+	{
+		const char* pOldPassword = pResult->GetString(0);
+		const char* pNewPassword = pResult->GetString(1);
+		const char* pPincode = pResult->GetString(2);
+		pGS->Core()->AccountManager()->ChangePassword(ClientID, pOldPassword, pNewPassword, pPincode);
+	}
 }
 
 void CCommandProcessor::ConChatLogin(IConsole::IResult* pResult, void* pUser)
@@ -91,8 +153,7 @@ void CCommandProcessor::ConChatGuild(IConsole::IResult* pResult, void* pUser)
 	const int ClientID = pResult->GetClientID();
 	auto* pGS = GetCommandResultGameServer(ClientID, pUser);
 	auto* pPlayer = pGS->GetPlayer(ClientID);
-
-	if(!pPlayer || !pPlayer->IsAuthed())
+	if(!is_valid_player(pGS, pPlayer, true))
 		return;
 
 	// If the command element is "leave", leave the guild
@@ -141,13 +202,10 @@ void CCommandProcessor::ConChatGuild(IConsole::IResult* pResult, void* pUser)
 
 void CCommandProcessor::ConChatHouse(IConsole::IResult* pResult, void* pUser)
 {
-	// Get the game server associated with the client ID
 	const int ClientID = pResult->GetClientID();
-	CGS* pGS = GetCommandResultGameServer(ClientID, pUser);
-
-	// If the player is not authenticated, return
-	CPlayer* pPlayer = pGS->GetPlayer(ClientID);
-	if(!pPlayer || !pPlayer->IsAuthed())
+	auto* pGS = GetCommandResultGameServer(ClientID, pUser);
+	auto* pPlayer = pGS->GetPlayer(ClientID);
+	if(!is_valid_player(pGS, pPlayer, true))
 		return;
 
 	// If the player does not own a house, send a chat message and return
@@ -248,22 +306,14 @@ void CCommandProcessor::ConChatHouse(IConsole::IResult* pResult, void* pUser)
 
 void CCommandProcessor::ConGroup(IConsole::IResult* pResult, void* pUser)
 {
-	// Get the client ID from the result
 	const int ClientID = pResult->GetClientID();
-
-	// Get the server and game server objects
-	IServer* pServer = (IServer*)pUser;
-	CGS* pGS = (CGS*)pServer->GameServer(pServer->GetClientWorldID(ClientID));
-
-	// Get the player object for the client
-	CPlayer* pPlayer = pGS->GetPlayer(ClientID, true);
-	if(!pPlayer)
+	auto* pGS = GetCommandResultGameServer(ClientID, pUser);
+	auto* pPlayer = pGS->GetPlayer(ClientID, true);
+	if(!is_valid_player(pGS, pPlayer, true))
 		return;
 
 	// Get the requested element from the result
 	const std::string pElem = pResult->GetString(0);
-
-	// Check if the requested element is "create"
 	if(pElem.compare(0, 6, "create") == 0)
 	{
 		// Create a group for the player
@@ -321,10 +371,9 @@ void CCommandProcessor::ConGroup(IConsole::IResult* pResult, void* pUser)
 void CCommandProcessor::ConChatUseItem(IConsole::IResult* pResult, void* pUser)
 {
 	const int ClientID = pResult->GetClientID();
-	CGS* pGS = GetCommandResultGameServer(ClientID, pUser);
-
-	CPlayer* pPlayer = pGS->GetPlayer(ClientID);
-	if(!pPlayer || !pPlayer->IsAuthed())
+	auto* pGS = GetCommandResultGameServer(ClientID, pUser);
+	auto* pPlayer = pGS->GetPlayer(ClientID);
+	if(!is_valid_player(pGS, pPlayer, true))
 		return;
 
 	// check valid
@@ -341,10 +390,9 @@ void CCommandProcessor::ConChatUseItem(IConsole::IResult* pResult, void* pUser)
 void CCommandProcessor::ConChatUseSkill(IConsole::IResult* pResult, void* pUser)
 {
 	const int ClientID = pResult->GetClientID();
-	CGS* pGS = GetCommandResultGameServer(ClientID, pUser);
-
-	CPlayer* pPlayer = pGS->GetPlayer(ClientID);
-	if(!pPlayer || !pPlayer->IsAuthed())
+	auto* pGS = GetCommandResultGameServer(ClientID, pUser);
+	auto* pPlayer = pGS->GetPlayer(ClientID);
+	if(!is_valid_player(pGS, pPlayer, true))
 		return;
 
 	// check valid
@@ -361,10 +409,9 @@ void CCommandProcessor::ConChatUseSkill(IConsole::IResult* pResult, void* pUser)
 void CCommandProcessor::ConChatCmdList(IConsole::IResult* pResult, void* pUser)
 {
 	const int ClientID = pResult->GetClientID();
-	CGS* pGS = GetCommandResultGameServer(ClientID, pUser);
-
-	CPlayer* pPlayer = pGS->GetPlayer(ClientID);
-	if(!pPlayer)
+	auto* pGS = GetCommandResultGameServer(ClientID, pUser);
+	auto* pPlayer = pGS->GetPlayer(ClientID);
+	if(!is_valid_player(pGS, pPlayer, false))
 		return;
 
 	constexpr int MaxPage = 2;
@@ -395,10 +442,9 @@ void CCommandProcessor::ConChatCmdList(IConsole::IResult* pResult, void* pUser)
 void CCommandProcessor::ConChatRules(IConsole::IResult* pResult, void* pUser)
 {
 	const int ClientID = pResult->GetClientID();
-	CGS* pGS = GetCommandResultGameServer(ClientID, pUser);
-
-	CPlayer* pPlayer = pGS->GetPlayer(ClientID);
-	if(!pPlayer)
+	auto* pGS = GetCommandResultGameServer(ClientID, pUser);
+	auto* pPlayer = pGS->GetPlayer(ClientID);
+	if(!is_valid_player(pGS, pPlayer, false))
 		return;
 
 	// translate to russian
@@ -414,38 +460,51 @@ void CCommandProcessor::ConChatRules(IConsole::IResult* pResult, void* pUser)
 	pGS->Chat(ClientID, "- The admins and moderators will mute/kick/ban per discretion");
 }
 
-void CCommandProcessor::ConChatBonuses(IConsole::IResult* pResult, void* pUser)
+void CCommandProcessor::ConChatInfo(IConsole::IResult* pResult, void* pUser)
 {
 	const int ClientID = pResult->GetClientID();
 	auto* pGS = GetCommandResultGameServer(ClientID, pUser);
 	auto* pPlayer = pGS->GetPlayer(ClientID);
-	if(!pPlayer)
+	if(!is_valid_player(pGS, pPlayer, false))
 		return;
 
-	// send bonuses info
-	pGS->SendMenuMotd(pPlayer, MOTD_MENU_BONUSES_INFO);
+	pGS->Chat(ClientID, mystd::aesthetic::wrapLinePillar(10).c_str());
+	pGS->Chat(ClientID, "Mod by 'Kurosio'. Version: {}.", MRPG_PROJECT_VERSION);
+	pGS->Chat(ClientID, "Content manager: 'Halloween'.");
+	pGS->Chat(ClientID, "Discord: '{}'.", g_Config.m_SvDiscordInviteLink);
+	pGS->Chat(ClientID, "More commands in '/cmdlist'.", g_Config.m_SvDiscordInviteLink);
 }
 
 void CCommandProcessor::ConChatWiki(IConsole::IResult* pResult, void* pUser)
 {
 	const int ClientID = pResult->GetClientID();
-	CGS* pGS = GetCommandResultGameServer(ClientID, pUser);
-
-	CPlayer* pPlayer = pGS->GetPlayer(ClientID);
-	if(!pPlayer)
+	auto* pGS = GetCommandResultGameServer(ClientID, pUser);
+	auto* pPlayer = pGS->GetPlayer(ClientID);
+	if(!is_valid_player(pGS, pPlayer, true))
 		return;
 
 	// send wiki info
 	pGS->SendMenuMotd(pPlayer, MOTD_MENU_WIKI_INFO);
 }
 
+void CCommandProcessor::ConChatBonuses(IConsole::IResult* pResult, void* pUser)
+{
+	const int ClientID = pResult->GetClientID();
+	auto* pGS = GetCommandResultGameServer(ClientID, pUser);
+	auto* pPlayer = pGS->GetPlayer(ClientID);
+	if(!is_valid_player(pGS, pPlayer, true))
+		return;
+
+	// send bonuses info
+	pGS->SendMenuMotd(pPlayer, MOTD_MENU_BONUSES_INFO);
+}
+
 void CCommandProcessor::ConChatVoucher(IConsole::IResult* pResult, void* pUser)
 {
 	const int ClientID = pResult->GetClientID();
-	CGS* pGS = GetCommandResultGameServer(ClientID, pUser);
-
-	CPlayer* pPlayer = pGS->GetPlayer(ClientID);
-	if(!pPlayer || !pPlayer->IsAuthed())
+	auto* pGS = GetCommandResultGameServer(ClientID, pUser);
+	auto* pPlayer = pGS->GetPlayer(ClientID);
+	if(!is_valid_player(pGS, pPlayer, true))
 		return;
 
 	if(pResult->NumArguments() != 1)

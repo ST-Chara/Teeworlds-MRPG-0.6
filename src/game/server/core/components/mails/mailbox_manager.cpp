@@ -109,13 +109,15 @@ void CMailboxManager::ShowMailboxList(CPlayer *pPlayer)
 	VoteWrapper::AddEmptyline(ClientID);
 
 	// unreaded mails
-	VoteWrapper VUnreadList(ClientID, VWF_OPEN, "\u2709 List of unread mails ({} of {})", (int)vUnreadMails.size(), (int)MAIL_MAX_CAPACITY);
+	VoteWrapper VUnreadList(ClientID, VWF_SEPARATE | VWF_ALIGN_TITLE | VWF_STYLE_SIMPLE,
+		"\u2709 List of unread mails ({} of {})", (int)vUnreadMails.size(), (int)MAIL_MAX_CAPACITY);
 	for(auto& p : vUnreadMails)
 		VUnreadList.AddMenu(MENU_MAILBOX_SELECT, p.m_ID, "{} (UID:{})", p.m_Name,p.m_ID);
 	VoteWrapper::AddEmptyline(ClientID);
 
 	// readed mails
-	VoteWrapper VReadList(ClientID, VWF_OPEN, "\u2709 List of read mails ({} of {})", (int)vReadedMails.size(), (int)MAIL_MAX_CAPACITY);
+	VoteWrapper VReadList(ClientID, VWF_SEPARATE | VWF_ALIGN_TITLE | VWF_STYLE_SIMPLE,
+		"\u2709 List of read mails ({} of {})", (int)vReadedMails.size(), (int)MAIL_MAX_CAPACITY);
 	for(auto& p : vReadedMails)
 		VReadList.AddMenu(MENU_MAILBOX_SELECT, p.m_ID, "{} (UID:{})", p.m_Name, p.m_ID);
 	VoteWrapper::AddEmptyline(ClientID);
@@ -135,8 +137,8 @@ void CMailboxManager::ShowMail(int MailID, CPlayer* pPlayer) const
 		std::string Sender = pRes->getString("Sender").c_str();
 
 		// parse items
-		const nlohmann::json jsAttachedItems = nlohmann::json::parse(pRes->getString("AttachedItems").c_str());
-		CItemsContainer vAttachedItems = CItem::FromArrayJSON(jsAttachedItems, "items");
+		const auto attachedItemsJson = pRes->getJson("AttachedItems");
+		CItemsContainer vAttachedItems = attachedItemsJson.value("items", CItemsContainer {});
 
 		// parse description lines
 		std::string Descriptions = pRes->getString("Description").c_str();
@@ -181,11 +183,11 @@ bool CMailboxManager::AcceptMail(CPlayer* pPlayer, int MailID)
 		return false;
 
 	// parse items
-	const nlohmann::json jsAttachedItems = nlohmann::json::parse(pRes->getString("AttachedItems").c_str());
-	CItemsContainer vAttachedItems = CItem::FromArrayJSON(jsAttachedItems, "items");
-	CItemsContainer vCannotAcceptableItems {};
+	const auto attachedItemsJson = pRes->getJson("AttachedItems");
+	CItemsContainer vAttachedItems = attachedItemsJson.value("items", CItemsContainer {});
 
 	// accept attached items
+	CItemsContainer vCannotAcceptableItems {};
 	for(auto& pItem : vAttachedItems)
 	{
 		CPlayerItem* pPlayerItem = pPlayer->GetItem(pItem);

@@ -1,33 +1,27 @@
 /* (c) Magnus Auvinen. See licence.txt in the root of the distribution for more information. */
 /* If you are missing that file, acquire a complete release at teeworlds.com.                */
 #include "botwall.h"
-
 #include <game/server/gamecontext.h>
 
-CBotWall::CBotWall(CGameWorld* pGameWorld, vec2 Pos, vec2 Direction, int Flag)
-	: CEntity(pGameWorld, CGameWorld::ENTTYPE_BOT_WALL, Pos)
+CBotWall::CBotWall(CGameWorld* pGameWorld, vec2 Pos, vec2 Direction, int Flags)
+	: CEntity(pGameWorld, CGameWorld::ENTTYPE_BOT_DOOR, Pos, 64)
 {
-	GS()->Collision()->FillLengthWall(32, Direction, &m_Pos, &m_PosTo);
-	m_Active = false;
-	m_Flag = Flag;
+	// prepare positions
+	GS()->Collision()->FillLengthWall(Direction, &m_Pos, &m_PosTo);
+	GS()->Collision()->SetDoorFromToCollisionAt(m_Pos, m_PosTo, TILE_STOPA, 0, GetID());
 
+	// initialize variables
+	m_Flags = Flags;
+	m_Active = false;
 	GameWorld()->InsertEntity(this);
 }
 
 void CBotWall::HitCharacter(CCharacter* pChar)
 {
-	vec2 IntersectPos;
-	if(closest_point_on_line(m_Pos, m_PosTo, pChar->m_Core.m_Pos, IntersectPos))
+	if(is_within_distance_to_segment_sq(DOOR_ACTIVATION_RADIUS_SQUARED, m_Pos, m_PosTo, pChar->GetPos()))
 	{
-		const float Distance = distance(IntersectPos, pChar->m_Core.m_Pos);
-		if(Distance <= g_Config.m_SvDoorRadiusHit * 3)
-		{
-			if(Distance <= g_Config.m_SvDoorRadiusHit)
-			{
-				pChar->SetDoorHit(m_Pos, m_PosTo);
-			}
-			m_Active = true;
-		}
+		pChar->SetDoorHit(GetID());
+		m_Active = true;
 	}
 }
 
@@ -35,38 +29,43 @@ void CBotWall::Tick()
 {
 	m_Active = false;
 
-	for(CCharacter* pChar = (CCharacter*)GameWorld()->FindFirst(CGameWorld::ENTTYPE_CHARACTER); pChar; pChar = (CCharacter*)pChar->TypeNext())
+	for(auto* pChar = (CCharacter*)GameWorld()->FindFirst(CGameWorld::ENTTYPE_CHARACTER); pChar; pChar = (CCharacter*)pChar->TypeNext())
 	{
-		if(!pChar->GetPlayer()->IsBot())
+		auto* pPlayer = pChar->GetPlayer();
+		if(!pPlayer->IsBot())
 			continue;
 
-		const auto pPlayerBot = static_cast<CPlayerBot*>(pChar->GetPlayer());
-		int BotType = pPlayerBot->GetBotType();
-		if((m_Flag & WALLLINEFLAG_MOB_BOT) && (BotType == TYPE_BOT_MOB))
+		auto* pPlayerBot = static_cast<CPlayerBot*>(pPlayer);
+		const int BotType = pPlayerBot->GetBotType();
+		switch(BotType)
 		{
-			HitCharacter(pChar);
-			continue;
-		}
+			case TYPE_BOT_MOB:
+				if(m_Flags & WALLLINEFLAG_MOB_BOT)
+					HitCharacter(pChar);
+				break;
 
-		int MobID = pPlayerBot->GetBotMobID();
-		if((m_Flag & WALLLINEFLAG_NPC_BOT) && (BotType == TYPE_BOT_NPC) && (NpcBotInfo::ms_aNpcBot[MobID].m_Function != FUNCTION_NPC_GUARDIAN))
-		{
-			HitCharacter(pChar);
-			continue;
-		}
+			case TYPE_BOT_NPC:
+				if(m_Flags & WALLLINEFLAG_NPC_BOT)
+				{
+					const int MobID = pPlayerBot->GetBotMobID();
+					if(NpcBotInfo::ms_aNpcBot[MobID].m_Function != FUNCTION_NPC_GUARDIAN)
+						HitCharacter(pChar);
+				}
+				break;
 
-		if((m_Flag & WALLLINEFLAG_QUEST_BOT) && (BotType == TYPE_BOT_QUEST))
-		{
-			HitCharacter(pChar);
-			continue;
+			case TYPE_BOT_QUEST:
+				if(m_Flags & WALLLINEFLAG_QUEST_BOT)
+					HitCharacter(pChar);
+				break;
+			default: break;
 		}
 	}
 }
 
 void CBotWall::Snap(int SnappingClient)
 {
-	if(!m_Active || NetworkClipped(SnappingClient))
+	if(!m_Active || (NetworkClipped(SnappingClient) && NetworkClipped(SnappingClient, m_PosTo)))
 		return;
 
-	GS()->SnapLaser(SnappingClient, GetID(), m_Pos, m_PosTo, Server()->Tick() - 4, LASERTYPE_FREEZE, LASERTYPE_DOOR);
+	GS()->SnapLaser(SnappingClient, GetID(), m_Pos, m_PosTo, Server()->Tick() - 2, LASERTYPE_DOOR);
 }

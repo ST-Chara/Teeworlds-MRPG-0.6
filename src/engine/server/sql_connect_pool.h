@@ -45,75 +45,110 @@ public:
 	WrapperResultSet(const WrapperResultSet&) = delete;
 	WrapperResultSet& operator=(const WrapperResultSet&) = delete;
 
-	bool getBoolean(const SQLString& column) const 
+	bool getBoolean(const SQLString& column) const
 	{
-		return m_pResult->getBoolean(column); 
+		return m_pResult->getBoolean(column);
 	}
 
-	int getInt(const SQLString& column) const 
+	int getInt(const SQLString& column) const
 	{
-		return m_pResult->getInt(column); 
+		return m_pResult->getInt(column);
 	}
-	unsigned int getUInt(const SQLString& column) const 
+	unsigned int getUInt(const SQLString& column) const
 	{
-		return m_pResult->getUInt(column); 
-	}
-
-	int64_t getInt64(const SQLString& column) const 
-	{
-		return m_pResult->getInt64(column); 
+		return m_pResult->getUInt(column);
 	}
 
-	uint64_t getUInt64(const SQLString& column) const 
+	int64_t getInt64(const SQLString& column) const
 	{
-		return m_pResult->getUInt64(column); 
+		return m_pResult->getInt64(column);
 	}
 
-	float getFloat(const SQLString& column) const 
+	uint64_t getUInt64(const SQLString& column) const
 	{
-		return static_cast<float>(m_pResult->getDouble(column)); 
+		return m_pResult->getUInt64(column);
 	}
 
-	double getDouble(const SQLString& column) const 
+	float getFloat(const SQLString& column) const
 	{
-		return m_pResult->getDouble(column); 
+		return static_cast<float>(m_pResult->getDouble(column));
 	}
 
-	std::string getString(const SQLString& column) const 
+	double getDouble(const SQLString& column) const
 	{
-		return std::string(m_pResult->getString(column).c_str()); 
+		return m_pResult->getDouble(column);
 	}
 
-	std::string getDateTime(const SQLString& column) const 
+	std::string getString(const SQLString& column) const
 	{
-		return std::string(m_pResult->getString(column).c_str()); 
+		return std::string(m_pResult->getString(column).c_str());
 	}
 
-	bool next() const 
+	std::string getDateTime(const SQLString& column) const
 	{
-		return m_pResult->next(); 
+		return std::string(m_pResult->getString(column).c_str());
 	}
 
-	size_t rowsCount() const 
+	nlohmann::json getJson(const SQLString& column) const
 	{
-		return m_pResult->rowsCount(); 
+		nlohmann::json result = nullptr;
+		if(!m_pResult)
+			return result;
+
+		const std::string jsonString = m_pResult->getString(column).c_str();
+		if(jsonString.empty())
+			return result;
+
+		try
+		{
+			return nlohmann::json::parse(jsonString);
+		}
+		catch(const nlohmann::json::parse_error& e)
+		{
+			[[unlikely]]
+			{
+				const auto errorMsg = fmt_default("JSON from DB for column '{}' failed to parse: {}", column.c_str(), e.what());
+				dbg_assert(false, errorMsg.c_str());
+				return nullptr;
+			}
+		}
+
+		return result;
 	}
 
-	size_t getRow() const 
+	bool next() const
 	{
-		return m_pResult->getRow(); 
+		return m_pResult->next();
+	}
+
+	size_t rowsCount() const
+	{
+		return m_pResult->rowsCount();
+	}
+
+	size_t getRow() const
+	{
+		return m_pResult->getRow();
 	}
 
 	BigInt getBigInt(const SQLString& column) const
 	{
+		const std::string stringValue = m_pResult->getString(column).c_str();
+		if(stringValue.empty())
+			return BigInt(0);
+
 		try
 		{
-			const std::string stringValue = m_pResult->getString(column).c_str();
 			return BigInt(stringValue);
 		}
 		catch(const SQLException& e)
 		{
-			throw std::runtime_error("Failed to convert column '" + std::string(column.c_str()) + "' to BigInt: " + e.what());
+			[[unlikely]]
+			{
+				const auto errorMsg = fmt_default("Failed to convert column '{}' to BigInt: {}", column.c_str(), e.what());
+				dbg_assert(false, errorMsg.c_str());
+				return BigInt();
+			}
 		}
 	}
 
@@ -124,7 +159,7 @@ private:
 /*
  * using typename
  */
-using ResultPtr = std::unique_ptr<WrapperResultSet>;
+using ResultPtr = std::shared_ptr<WrapperResultSet>;
 using CallbackResultPtr = std::function<void(ResultPtr)>;
 using CallbackUpdatePtr = std::function<void()>;
 
@@ -201,7 +236,7 @@ private:
 			try
 			{
 				const std::unique_ptr<Statement> pStmt(pConnection->createStatement());
-				pResult = std::make_unique<WrapperResultSet>(pStmt->executeQuery(m_Query.c_str()));
+				pResult = std::make_shared<WrapperResultSet>(pStmt->executeQuery(m_Query.c_str()));
 				pStmt->close();
 			}
 			catch (SQLException& e)
@@ -220,7 +255,7 @@ private:
 
 		void AtExecute(const CallbackResultPtr& pCallbackResult)
 		{
-			auto Item = [pCallbackResult](const std::string Query)
+			auto Item = [callback = std::move(pCallbackResult)](const std::string Query)
 			{
 				const char* pError = nullptr;
 
@@ -230,10 +265,10 @@ private:
 				try
 				{
 					const std::unique_ptr<Statement> pStmt(pConnection->createStatement());
-					auto pResult = std::make_unique<WrapperResultSet>(pStmt->executeQuery(Query.c_str()));
-					if(pCallbackResult)
+					auto pResult = std::make_shared<WrapperResultSet>(pStmt->executeQuery(Query.c_str()));
+					if(callback)
 					{
-						pCallbackResult(std::move(pResult));
+						callback(std::move(pResult));
 					}
 					pStmt->close();
 				}
@@ -272,7 +307,7 @@ private:
 
 		void AtExecute(const CallbackUpdatePtr& pCallbackResult, int DelayMilliseconds = 0)
 		{
-			auto Item = [pCallbackResult](const std::string Query, const int Milliseconds)
+			auto Item = [callback = std::move(pCallbackResult)](const std::string Query, const int Milliseconds)
 			{
 				if (Milliseconds > 0)
 					std::this_thread::sleep_for(std::chrono::milliseconds(Milliseconds));
@@ -286,9 +321,9 @@ private:
 				{
 					const std::unique_ptr<Statement> pStmt(pConnection->createStatement());
 					pStmt->execute(Query.c_str());
-					if(pCallbackResult)
+					if(callback)
 					{
-						pCallbackResult();
+						callback();
 					}
 					pStmt->close();
 				}

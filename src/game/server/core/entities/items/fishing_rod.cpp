@@ -4,7 +4,7 @@
 #include <game/server/entity_manager.h>
 
 CEntityFishingRod::CEntityFishingRod(CGameWorld* pGameWorld, int ClientID, vec2 Position, vec2 Force)
-	: CEntity(pGameWorld, CGameWorld::ENTTYPE_PATH_FINDER, Position, 0, ClientID)
+	: CEntity(pGameWorld, CGameWorld::ENTTYPE_TOOLS, Position, 0, ClientID)
 {
 	m_EndRodPoint = Position;
 	m_Rope.Init(NUM_ROPE_POINTS, Position, Force);
@@ -14,6 +14,12 @@ CEntityFishingRod::CEntityFishingRod(CGameWorld* pGameWorld, int ClientID, vec2 
 	AddSnappingGroupIds(ROD, NUM_ROD_POINTS);
 	AddSnappingGroupIds(ROPE, NUM_ROPE_POINTS);
 	GameWorld()->InsertEntity(this);
+}
+
+CEntityFishingRod::~CEntityFishingRod()
+{
+	if(auto* pChar = GS()->GetPlayerChar(m_ClientID))
+		pChar->m_pFishingRod = nullptr;
 }
 
 void CEntityFishingRod::Tick()
@@ -44,8 +50,8 @@ void CEntityFishingRod::Tick()
 
 	// check equip fishing rod
 	auto* pPlayer = pChar->GetPlayer();
-	const auto EquippedItemID = pPlayer->GetEquippedItemID(ItemType::EquipFishrod);
-	if(!EquippedItemID.has_value())
+	const auto EquippedFishrodItemIdOpt = pPlayer->GetEquippedSlotItemID(ItemType::EquipFishrod);
+	if(!EquippedFishrodItemIdOpt.has_value())
 	{
 		GS()->Chat(m_ClientID, "To start fishing, equip your fishing rod!");
 		MarkForDestroy();
@@ -57,8 +63,12 @@ void CEntityFishingRod::Tick()
 	m_Rope.UpdatePhysics(GS()->Collision(), 3.0f, 16.f, 64.f);
 	m_Rope.m_vPoints[0] = m_EndRodPoint;
 
+	// view cam effect
+	const auto& lastPoint = m_Rope.m_vPoints.back();
+	pPlayer->LockedView().ViewLock(lastPoint, true);
+
 	// fishing only water
-	const auto& TestBox = vec2(m_Rope.m_vPoints.back().x, m_Rope.m_vPoints.back().y + 18.f);
+	const auto& TestBox = vec2(lastPoint.x, lastPoint.y + 18.f);
 	if((GS()->Collision()->GetCollisionFlagsAt(TestBox) & CCollision::COLFLAG_WATER) == 0)
 	{
 		// pulling unground water
@@ -85,7 +95,7 @@ void CEntityFishingRod::Tick()
 	}
 
 	// fishing logic
-	FishingTick(pPlayer, pFisherman, pNode, EquippedItemID);
+	FishingTick(pPlayer, pFisherman, pNode, EquippedFishrodItemIdOpt);
 }
 
 void CEntityFishingRod::FishingTick(CPlayer* pPlayer, CProfession* pFisherman, GatheringNode* pNode, std::optional<int> EquippedItemID)
@@ -97,8 +107,9 @@ void CEntityFishingRod::FishingTick(CPlayer* pPlayer, CProfession* pFisherman, G
 	{
 		if(m_Fishing.m_State == FishingNow::HOOKING)
 		{
+			const auto HookingNextTime = pPlayer->GetItem(itFishBait)->IsEquipped() ? 10 : 15;
 			m_Fishing.m_State = FishingNow::WAITING;
-			m_Fishing.m_HookingTime = SERVER_TICK_SPEED * (3 + rand() % 15);
+			m_Fishing.m_HookingTime = SERVER_TICK_SPEED * (3 + HookingNextTime);
 		}
 		else
 		{
@@ -120,12 +131,12 @@ void CEntityFishingRod::FishingTick(CPlayer* pPlayer, CProfession* pFisherman, G
 	}
 
 	// hooking state
-	vec2& lastPoint = m_Rope.m_vPoints.back();
 	if(m_Fishing.m_State == FishingNow::HOOKING)
 	{
 		// effect hooking
 		if(m_Fishing.m_HookingTime % Server()->TickSpeed() == 0)
 		{
+			const auto lastPoint = m_Rope.m_vPoints.back();
 			GS()->CreateDeath(lastPoint, m_ClientID);
 			m_Rope.SetForce(vec2(0.f, 5.f));
 		}
@@ -150,6 +161,7 @@ void CEntityFishingRod::FishingTick(CPlayer* pPlayer, CProfession* pFisherman, G
 		// set end point
 		if(!m_Fishing.m_FromPoint)
 		{
+			const auto lastPoint = m_Rope.m_vPoints.back();
 			m_Fishing.m_FromPoint = lastPoint;
 			m_Fishing.m_InterpolatedX = lastPoint.x;
 		}
@@ -179,22 +191,27 @@ void CEntityFishingRod::FishingTick(CPlayer* pPlayer, CProfession* pFisherman, G
 		}
 
 		// smooth moving
-		if(lastPoint.x != m_Fishing.m_InterpolatedX)
-			lastPoint.x += (m_Fishing.m_InterpolatedX - lastPoint.x) * 0.1f;
+		if(!m_Rope.m_vPoints.empty())
+		{
+			auto& lastPointRef = m_Rope.m_vPoints.back();
+			if(lastPointRef.x != m_Fishing.m_InterpolatedX)
+				lastPointRef.x += (m_Fishing.m_InterpolatedX - lastPointRef.x) * 0.1f;
+		}
 
 		// success
 		if(m_Fishing.m_Health <= 0)
 		{
+			auto& lastPointRef = m_Rope.m_vPoints.back();
 			const auto Value = 1 + rand() % 2;
 			const auto ItemID = pNode->m_vItems.getRandomElement();
 			auto* pPlayerItem = pPlayer->GetItem(ItemID);
-			pFisherman->AddExperience(pNode->Level);
+			pFisherman->AddExperience(pNode->Level * 2);
 			pPlayerItem->Add(Value);
 
 			// create design drop pickup
 			const auto DesignPos = vec2(m_EndRodPoint.x, m_EndRodPoint.y - 24.f);
 			GS()->EntityManager()->DesignRandomDrop(2 + rand() % 2, 8.0f, DesignPos, Server()->TickSpeed(), POWERUP_HEALTH, 0, CmaskOne(pPlayer->GetCID()));
-			lastPoint = m_EndRodPoint;
+			lastPointRef = m_EndRodPoint;
 			m_Fishing.m_State = FishingNow::SUCCESS;
 		}
 
@@ -218,7 +235,10 @@ void CEntityFishingRod::Snap(int SnappingClient)
 		return;
 
 	// initialize variables
-	auto& rodIds = GetSnappingGroupIds(ROD);
+	const auto* pvRodIds = FindSnappingGroupIds(ROD);
+	if(!pvRodIds)
+		return;
+
 	const auto curTick = Server()->Tick();
 	const bool facingRight = (pChar->m_LatestInput.m_TargetX > 0.f);
 	const std::array<std::pair<vec2, vec2>, 3> positions = {
@@ -229,18 +249,21 @@ void CEntityFishingRod::Snap(int SnappingClient)
 	} };
 
 	// draw fishingrod segments
-	const auto numSegments = std::min(rodIds.size(), positions.size());
+	const auto numSegments = std::min((*pvRodIds).size(), positions.size());
 	for(size_t i = 0; i < numSegments; ++i)
 	{
 		const auto& [first, second] = positions[i];
 		const auto From = facingRight ? vec2(m_Pos.x + first.x, m_Pos.y + first.y) : vec2(m_Pos.x - first.x, m_Pos.y + first.y);
 		const auto To = facingRight ? vec2(m_Pos.x + second.x, m_Pos.y + second.y) : vec2(m_Pos.x - second.x, m_Pos.y + second.y);
-		GS()->SnapLaser(SnappingClient, rodIds[i], From, To, curTick - 2, LASERTYPE_SHOTGUN);
+		GS()->SnapLaser(SnappingClient, (*pvRodIds)[i], From, To, curTick - 2, LASERTYPE_SHOTGUN);
 		m_EndRodPoint = To;
 	}
 
 	// draw rope
-	auto& ropeIds = GetSnappingGroupIds(ROPE);
+	const auto* pvRopeIds = FindSnappingGroupIds(ROPE);
+	if(!pvRopeIds)
+		return;
+
 	const size_t ropePointCount = m_Rope.m_vPoints.size();
 	if(ropePointCount >= 2)
 	{
@@ -248,7 +271,7 @@ void CEntityFishingRod::Snap(int SnappingClient)
 		{
 			const auto& From = m_Rope.m_vPoints[i];
 			const auto& To = m_Rope.m_vPoints[i + 1];
-			GS()->SnapLaser(SnappingClient, ropeIds[i], From, To, curTick - 6, LASERTYPE_DRAGGER);
+			GS()->SnapLaser(SnappingClient, (*pvRopeIds)[i], From, To, curTick - 6, LASERTYPE_DRAGGER);
 		}
 
 		// draw rod float

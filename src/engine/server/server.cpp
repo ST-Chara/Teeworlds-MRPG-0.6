@@ -94,7 +94,7 @@ CServer::~CServer()
 IGameServer* CServer::GameServer(int WorldID) const
 {
 	if(!MultiWorlds()->IsValid(WorldID))
-		return MultiWorlds()->GetWorld(MAIN_WORLD_ID)->GameServer();
+		return MultiWorlds()->GetWorld(INITIALIZER_WORLD_ID)->GameServer();
 	return MultiWorlds()->GetWorld(WorldID)->GameServer();
 }
 
@@ -279,7 +279,7 @@ void CServer::ChangeWorld(int ClientID, int NewWorldID)
 int CServer::GetClientWorldID(int ClientID) const
 {
 	if(ClientID < 0 || ClientID >= MAX_CLIENTS || m_aClients[ClientID].m_State < CClient::STATE_READY)
-		return MAIN_WORLD_ID;
+		return INITIALIZER_WORLD_ID;
 
 	return m_aClients[ClientID].m_WorldID;
 }
@@ -461,6 +461,22 @@ void CServer::GetClientAddr(int ClientID, char* pAddrStr, int Size) const
 		net_addr_str(m_NetServer.ClientAddr(ClientID), pAddrStr, Size, false);
 }
 
+void CServer::SetSpectatorID(int ClientID, int SpectatorID)
+{
+	if(ClientID < 0 || ClientID >= MAX_CLIENTS || m_aClients[ClientID].m_State != CClient::STATE_INGAME)
+		return;
+
+	m_aClients[ClientID].m_SpectatorID = SpectatorID;
+}
+
+int CServer::GetSpectatorID(int ClientID) const
+{
+	if(ClientID < 0 || ClientID >= MAX_CLIENTS || m_aClients[ClientID].m_State != CClient::STATE_INGAME)
+		return SPEC_FREEVIEW;
+
+	return m_aClients[ClientID].m_SpectatorID;
+}
+
 void CServer::SetStateClientMRPG(int ClientID, bool State)
 {
 	if(ClientID < 0 || ClientID >= MAX_CLIENTS || m_aClients[ClientID].m_State < CClient::STATE_READY)
@@ -520,6 +536,19 @@ int CServer::GetClientLatency(int ClientID) const
 		return 0;
 
 	return m_aClients[ClientID].m_Latency;
+}
+
+int CServer::GetClientsCountByWorld(int WorldID) const
+{
+	int Result = 0;
+
+	for(int i = 0; i < MAX_PLAYERS; i++)
+	{
+		if(m_aClients[i].m_State == CClient::STATE_INGAME && m_aClients[i].m_WorldID == WorldID)
+			Result++;
+	}
+
+	return Result;
 }
 
 void CServer::InitRconPasswordIfUnset()
@@ -769,7 +798,7 @@ int CServer::NewClientNoAuthCallback(int ClientID, void* pUser)
 {
 	CServer* pThis = (CServer*)pUser;
 
-	pThis->GameServer(MAIN_WORLD_ID)->OnClearClientData(ClientID);
+	pThis->GameServer(INITIALIZER_WORLD_ID)->OnClearClientData(ClientID);
 	pThis->m_aClients[ClientID].m_State = CClient::STATE_CONNECTING;
 	pThis->m_aClients[ClientID].m_aName[0] = 0;
 	pThis->m_aClients[ClientID].m_aClan[0] = 0;
@@ -781,6 +810,7 @@ int CServer::NewClientNoAuthCallback(int ClientID, void* pUser)
 	pThis->m_aClients[ClientID].m_DDNetVersion = VERSION_NONE;
 	pThis->m_aClients[ClientID].m_GotDDNetVersionPacket = false;
 	pThis->m_aClients[ClientID].m_DDNetVersionSettled = false;
+	pThis->m_aClients[ClientID].m_SpectatorID = SPEC_FREEVIEW;
 	pThis->m_aClients[ClientID].Reset();
 
 	pThis->SendCapabilities(ClientID);
@@ -795,7 +825,7 @@ int CServer::NewClientCallback(int ClientID, void* pUser)
 	memset(pIdMap, -1, sizeof(int) * VANILLA_MAX_CLIENTS);
 	pIdMap[0] = ClientID;
 
-	pThis->GameServer(MAIN_WORLD_ID)->OnClearClientData(ClientID);
+	pThis->GameServer(INITIALIZER_WORLD_ID)->OnClearClientData(ClientID);
 	str_copy(pThis->m_aClients[ClientID].m_aLanguage, "en", sizeof(pThis->m_aClients[ClientID].m_aLanguage));
 	pThis->m_aClients[ClientID].m_State = CClient::STATE_AUTH;
 	pThis->m_aClients[ClientID].m_aName[0] = 0;
@@ -812,6 +842,7 @@ int CServer::NewClientCallback(int ClientID, void* pUser)
 	pThis->m_aClients[ClientID].m_IsClientMRPG = false;
 	pThis->m_aClients[ClientID].m_Quitting = false;
 
+	pThis->m_aClients[ClientID].m_SpectatorID = SPEC_FREEVIEW;
 	pThis->m_aClients[ClientID].m_DDNetVersion = VERSION_NONE;
 	pThis->m_aClients[ClientID].m_GotDDNetVersionPacket = false;
 	pThis->m_aClients[ClientID].m_DDNetVersionSettled = false;
@@ -842,7 +873,7 @@ int CServer::DelClientCallback(int ClientID, const char* pReason, void* pUser)
 			pGameServer->OnClientDrop(ClientID, pReason);
 		}
 
-		pThis->GameServer(MAIN_WORLD_ID)->OnClearClientData(ClientID);
+		pThis->GameServer(INITIALIZER_WORLD_ID)->OnClearClientData(ClientID);
 		pThis->ExpireServerInfo();
 	}
 
@@ -859,6 +890,7 @@ int CServer::DelClientCallback(int ClientID, const char* pReason, void* pUser)
 	pThis->m_aClients[ClientID].m_ClientVersion = 0;
 	pThis->m_aClients[ClientID].m_IsClientMRPG = false;
 	pThis->m_aClients[ClientID].m_Quitting = false;
+	pThis->m_aClients[ClientID].m_SpectatorID = SPEC_FREEVIEW;
 	pThis->m_aClients[ClientID].m_Snapshots.PurgeAll();
 	return 0;
 }
@@ -969,7 +1001,7 @@ void CServer::SendRconLogLine(int ClientID, const CLogMessage* pMessage)
 	{
 		for(int i = 0; i < MAX_PLAYERS; i++)
 		{
-			if(m_aClients[i].m_State != CClient::STATE_EMPTY && m_aClients[i].m_Authed >= AUTHED_ADMIN)
+			if(m_aClients[i].m_State != CClient::STATE_EMPTY && m_aClients[i].m_Authed >= AUTHED_MOD)
 			{
 				SendRconLine(i, pLine);
 			}
@@ -1083,7 +1115,7 @@ void CServer::ProcessClientPacket(CNetChunk* pPacket)
 
 				m_aClients[ClientID].m_Version = Unpacker.GetInt();
 				m_aClients[ClientID].m_State = CClient::STATE_CONNECTING;
-				GameServer(MAIN_WORLD_ID)->OnClearClientData(ClientID);
+				GameServer(INITIALIZER_WORLD_ID)->OnClearClientData(ClientID);
 				SendCapabilities(ClientID);
 				SendMap(ClientID);
 			}
@@ -1165,7 +1197,7 @@ void CServer::ProcessClientPacket(CNetChunk* pPacket)
 				}
 
 				m_aClients[ClientID].m_State = CClient::STATE_INGAME;
-				GameServer(WorldID)->OnClientEnter(ClientID);
+				GameServer(WorldID)->OnClientEnter(ClientID, !m_aClients[ClientID].m_ChangeWorld);
 
 				ExpireServerInfo();
 			}
@@ -1487,8 +1519,8 @@ void CServer::CacheServerInfo(CBrowserCache* pCache, int Type, bool SendClients)
 
 	if(Type == SERVERINFO_EXTENDED)
 	{
-		ADD_INT(p, MultiWorlds()->GetWorld(MAIN_WORLD_ID)->MapDetail()->GetCrc());
-		ADD_INT(p, MultiWorlds()->GetWorld(MAIN_WORLD_ID)->MapDetail()->GetSize());
+		ADD_INT(p, MultiWorlds()->GetWorld(INITIALIZER_WORLD_ID)->MapDetail()->GetCrc());
+		ADD_INT(p, MultiWorlds()->GetWorld(INITIALIZER_WORLD_ID)->MapDetail()->GetSize());
 	}
 
 	// gametype
@@ -1651,11 +1683,11 @@ void CServer::UpdateRegisterServerInfo()
 		}
 	}
 
-	auto* pMainWorld = MultiWorlds()->GetWorld(MAIN_WORLD_ID);
+	auto* pMainWorld = MultiWorlds()->GetWorld(INITIALIZER_WORLD_ID);
 	auto* pMapDetail = pMainWorld->MapDetail();
 
 	char aMapSha256[SHA256_MAXSTRSIZE];
-	sha256_str(MultiWorlds()->GetWorld(MAIN_WORLD_ID)->MapDetail()->GetSha256(), aMapSha256, sizeof(aMapSha256));
+	sha256_str(MultiWorlds()->GetWorld(INITIALIZER_WORLD_ID)->MapDetail()->GetSha256(), aMapSha256, sizeof(aMapSha256));
 
 	nlohmann::json JsServerInfo =
 	{
@@ -2010,7 +2042,7 @@ int CServer::Run(ILogger* pLogger)
 					}
 				}
 
-				MultiWorlds()->GetWorld(MAIN_WORLD_ID)->GameServer()->OnTickGlobal();
+				MultiWorlds()->GetWorld(INITIALIZER_WORLD_ID)->GameServer()->OnTickGlobal();
 				for(int i = 0; i < MultiWorlds()->GetSizeInitilized(); i++)
 				{
 					IGameServer* pGameServer = MultiWorlds()->GetWorld(i)->GameServer();

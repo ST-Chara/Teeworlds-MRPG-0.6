@@ -5,7 +5,7 @@
 #include <game/server/gamecontext.h>
 
 CEntityDropPickup::CEntityDropPickup(CGameWorld *pGameWorld, vec2 Pos, vec2 Vel, int Type, int Subtype, int Value)
-: CEntity(pGameWorld, CGameWorld::ENTTYPE_BONUS_DROP, Pos, 16.f)
+: CEntity(pGameWorld, CGameWorld::ENTTYPE_PICKUP, Pos, 16.f)
 {
 	m_Vel = Vel;
 	m_Type = Type;
@@ -53,19 +53,19 @@ void CEntityDropPickup::Tick()
 		else if (m_Type == POWERUP_WEAPON)
 		{
 			// shotgun
-			if (m_Subtype == WEAPON_SHOTGUN && pChar->GetPlayer()->IsEquipped(ItemType::EquipShotgun))
+			if (m_Subtype == WEAPON_SHOTGUN && pChar->GetPlayer()->IsEquippedSlot(ItemType::EquipShotgun))
 			{
 				pChar->GiveWeapon(m_Subtype, m_Value);
 				GS()->CreateSound(m_Pos, SOUND_PICKUP_SHOTGUN);
 			}
 			// grenade
-			else if (m_Subtype == WEAPON_GRENADE && pChar->GetPlayer()->IsEquipped(ItemType::EquipGrenade))
+			else if (m_Subtype == WEAPON_GRENADE && pChar->GetPlayer()->IsEquippedSlot(ItemType::EquipGrenade))
 			{
 				pChar->GiveWeapon(m_Subtype, m_Value);
 				GS()->CreateSound(m_Pos, SOUND_PICKUP_GRENADE);
 			}
 			// laser
-			else if (m_Subtype == WEAPON_LASER && pChar->GetPlayer()->IsEquipped(ItemType::EquipLaser))
+			else if (m_Subtype == WEAPON_LASER && pChar->GetPlayer()->IsEquippedSlot(ItemType::EquipLaser))
 			{
 				pChar->GiveWeapon(m_Subtype, m_Value);
 				GS()->CreateSound(m_Pos, SOUND_PICKUP_SHOTGUN);

@@ -60,13 +60,13 @@ CPlayer* CBaseAI::SearchPlayerCondition(float Distance, const std::function<bool
 			continue;
 
 		const bool IntersectedWithInvisibleLine = GS()->Collision()->IntersectLineWithInvisible(CandidatePos, PlayerPos, nullptr, nullptr);
-		m_Target.UpdateCollised(IntersectedWithInvisibleLine);
-		if(GS()->Collision()->IntersectLineWithInvisible(CandidatePos, PlayerPos, nullptr, nullptr))
+		if(IntersectedWithInvisibleLine)
 			continue;
 
 		if(!Condition(pCandidatePlayer))
 			continue;
 
+		m_Target.UpdateCollised(IntersectedWithInvisibleLine);
 		return pCandidatePlayer;
 	}
 
@@ -80,8 +80,7 @@ CPlayerBot* CBaseAI::SearchPlayerBotCondition(float Distance, const std::functio
 		if(m_pPlayer->GetCID() == i)
 			continue;
 
-		CPlayerBot* pCandidatePlayer = dynamic_cast<CPlayerBot*>(GS()->GetPlayer(i));
-
+		auto* pCandidatePlayer = dynamic_cast<CPlayerBot*>(GS()->GetPlayer(i));
 		if(!pCandidatePlayer || !pCandidatePlayer->GetCharacter())
 			continue;
 
@@ -94,13 +93,13 @@ CPlayerBot* CBaseAI::SearchPlayerBotCondition(float Distance, const std::functio
 			continue;
 
 		const bool IntersectedWithInvisibleLine = GS()->Collision()->IntersectLineWithInvisible(CandidatePos, PlayerPos, nullptr, nullptr);
-		m_Target.UpdateCollised(IntersectedWithInvisibleLine);
-		if(GS()->Collision()->IntersectLineWithInvisible(CandidatePos, PlayerPos, nullptr, nullptr))
+		if(IntersectedWithInvisibleLine)
 			continue;
 
 		if(!Condition(pCandidatePlayer))
 			continue;
 
+		m_Target.UpdateCollised(IntersectedWithInvisibleLine);
 		return pCandidatePlayer;
 	}
 

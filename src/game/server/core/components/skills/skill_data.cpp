@@ -90,12 +90,6 @@ bool CSkill::Use()
 	const vec2 PlayerPosition = pChar->GetPos();
 	auto& pEntSkillPtr = m_apEntSkillPtrs[m_ID];
 
-	// Attack teleport
-	if(IsActivated(pChar, ManaCost, SKILL_ATTACK_TELEPORT))
-	{
-		new CAttackTeleport(&GS()->m_World, PlayerPosition, pPlayer, GetBonus());
-		return true;
-	}
 
 	// Cure I
 	if(IsActivated(pChar, ManaCost, SKILL_CURE))
@@ -167,7 +161,9 @@ bool CSkill::Use()
 		return true;
 	}
 
-	// Provoke
+	//*
+	//* TANK
+	//*
 	if(IsActivated(pChar, ManaCost, SKILL_PROVOKE))
 	{
 		// provoke mobs
@@ -193,13 +189,16 @@ bool CSkill::Use()
 				continue;
 
 			// check target upper agression
-			if(const auto* pTargetPl = GS()->GetPlayer(pSearchChar->AI()->GetTarget()->GetCID(), false, true))
+			if(const auto* pTargetChar = GS()->GetPlayerChar(pSearchChar->AI()->GetTarget()->GetCID()))
 			{
-				if(pTargetPl->GetMaxHealth() > pPlayer->GetMaxHealth())
+				if(pTargetChar->GetPlayer()->GetMaxHealth() > pPlayer->GetMaxHealth())
 				{
 					MissedProvoked = true;
 					continue;
 				}
+
+				// set target for client
+				pSearchPl->m_TargetPos = pTargetChar->GetPos();
 			}
 
 			// set agression
@@ -223,40 +222,28 @@ bool CSkill::Use()
 	if(IsActivated(pChar, ManaCost, SKILL_SLEEPY_GRAVITY, SKILL_USAGE_RESET))
 	{
 		const auto UpgradedValue = minimum(200.f + GetBonus(), 400.f);
-		GS()->EntityManager()->GravityDisruption(ClientID, PlayerPosition, UpgradedValue, 10 * Server()->TickSpeed(),
-			ManaCost, &pEntSkillPtr);
+		const auto Damage = maximum(1, pPlayer->GetTotalAttributeValue(AttributeIdentifier::DMG));
+		GS()->EntityManager()->GravityDisruption(ClientID, PlayerPosition, UpgradedValue, 10 * Server()->TickSpeed(), Damage, &pEntSkillPtr);
 		GS()->CreateSound(PlayerPosition, SOUND_SKILL_START);
 		return true;
 	}
 
-	if(IsActivated(pChar, ManaCost, SKILL_HEART_TURRET, SKILL_USAGE_RESET))
-	{
-		const auto UpgradeValue = (10 + GetBonus()) * Server()->TickSpeed();
-		GS()->EntityManager()->HealthTurret(ClientID, PlayerPosition, ManaCost, UpgradeValue, 2 * Server()->TickSpeed(), &pEntSkillPtr);
-		GS()->CreateSound(PlayerPosition, SOUND_SKILL_START);
-		return true;
-	}
 
 	if(IsActivated(pChar, ManaCost, SKILL_LAST_STAND, SKILL_USAGE_TOGGLE))
 	{
-		const auto ManaPerSeconds = translate_to_percent_rest(ManaCost, maximum(30 - GetBonus(), 15));
-		GS()->EntityManager()->LastStand(ClientID, PlayerPosition, 96.f, ManaPerSeconds, &pEntSkillPtr);
+		const int PercentManaCost = maximum(Info()->GetPercentageCost() - GetBonus(), 15);
+		GS()->EntityManager()->LastStand(ClientID, PlayerPosition, 96.f, PercentManaCost, &pEntSkillPtr);
 		GS()->CreateSound(PlayerPosition, SOUND_SKILL_START);
 		return true;
 	}
 
-	if(IsActivated(pChar, ManaCost, SKILL_MAGIC_BOW, SKILL_USAGE_TOGGLE))
-	{
-		const auto Shots = 1 + GetBonus();
-		GS()->EntityManager()->Bow(ClientID, 1, Shots, 180.f, 8, &pEntSkillPtr);
-		GS()->CreateSound(PlayerPosition, SOUND_SKILL_START);
-		return true;
-	}
 
-	if(IsActivated(pChar, ManaCost, SKILL_HEALING_AURA, SKILL_USAGE_RESET))
+	//*
+	//* DPS
+	//*
+	if(IsActivated(pChar, ManaCost, SKILL_ATTACK_TELEPORT))
 	{
-		const auto UpgradedValue = minimum(320.f + GetBonus(), 400.f);
-		GS()->EntityManager()->HealingAura(ClientID, PlayerPosition, UpgradedValue, 10 * Server()->TickSpeed(), ManaCost);
+		new CAttackTeleport(&GS()->m_World, PlayerPosition, pPlayer, GetBonus());
 		GS()->CreateSound(PlayerPosition, SOUND_SKILL_START);
 		return true;
 	}
@@ -264,7 +251,71 @@ bool CSkill::Use()
 	if(IsActivated(pChar, ManaCost, SKILL_FLAME_WALL, SKILL_USAGE_RESET))
 	{
 		const auto UpgradedValue = minimum(200.f + GetBonus(), 320.f);
-		GS()->EntityManager()->FlameWall(ClientID, PlayerPosition, UpgradedValue, 10 * Server()->TickSpeed(), 1, 0.3f);
+		const auto Damage = maximum(1, translate_to_percent_rest(pPlayer->GetTotalAttributeValue(AttributeIdentifier::DMG), 5.0f));
+
+		GS()->EntityManager()->FlameWall(ClientID, PlayerPosition, UpgradedValue, 10 * Server()->TickSpeed(), Damage, 0.3f);
+		GS()->CreateSound(PlayerPosition, SOUND_SKILL_START);
+		return true;
+	}
+
+
+	//*
+	//* HEALER
+	//*
+	if(IsActivated(pChar, ManaCost, SKILL_MAGIC_BOW, SKILL_USAGE_TOGGLE))
+	{
+		const auto Shots = 1 + GetBonus();
+		const auto Damage = maximum(1, pPlayer->GetTotalAttributeValue(AttributeIdentifier::DMG));
+		GS()->EntityManager()->Bow(ClientID, Damage, Shots, 180.f, 8, &pEntSkillPtr);
+		GS()->CreateSound(PlayerPosition, SOUND_SKILL_START);
+		return true;
+	}
+
+	if(IsActivated(pChar, ManaCost, SKILL_HEART_TURRET, SKILL_USAGE_RESET))
+	{
+		// initialize
+		constexpr int NumCastClicked = 5;
+		const auto UpgradeValue = (10 + GetBonus()) * Server()->TickSpeed();
+		auto FuncExecuteHealingRift = [this, UpgradeValue, ManaCost](int FinalClientID, vec2 FinalPosition, EntGroupWeakPtr* pFinalSkillTracker)
+		{
+			GS()->EntityManager()->HealthTurret(FinalClientID, FinalPosition, ManaCost, UpgradeValue, 2 * Server()->TickSpeed(), pFinalSkillTracker);
+		};
+
+		// start casting
+		GS()->EntityManager()->StartUniversalCast(ClientID, PlayerPosition, NumCastClicked, FuncExecuteHealingRift, &pEntSkillPtr);
+		GS()->CreateSound(PlayerPosition, SOUND_SKILL_START);
+		return true;
+	}
+
+	if(IsActivated(pChar, ManaCost, SKILL_HEALING_AURA, SKILL_USAGE_NONE))
+	{
+		// initialize
+		constexpr int NumCastClicked = 7;
+		const auto UpgradeValue = minimum(320.f + GetBonus(), 400.f);
+		auto FuncExecuteHealingAura = [this, UpgradeValue, ManaCost](int FinalClientID, vec2 FinalPosition, EntGroupWeakPtr* pFinalSkillTracker)
+		{
+			GS()->EntityManager()->HealingAura(FinalClientID, FinalPosition, UpgradeValue, 10 * Server()->TickSpeed(), ManaCost);
+		};
+
+		// start casting
+		GS()->EntityManager()->StartUniversalCast(ClientID, PlayerPosition, NumCastClicked, FuncExecuteHealingAura, nullptr);
+		GS()->CreateSound(PlayerPosition, SOUND_SKILL_START);
+		return true;
+	}
+
+	if(IsActivated(pChar, ManaCost, SKILL_HEALING_RIFT, SKILL_USAGE_RESET))
+	{
+		// initialize
+		constexpr int NumCastClicked = 16;
+		constexpr int Lifetime = 15 * SERVER_TICK_SPEED;
+		const auto HealingPerPulse = ManaCost;
+		auto FuncExecuteHealingRift = [this, Lifetime, HealingPerPulse](int FinalClientID, vec2 FinalPosition, EntGroupWeakPtr* pFinalSkillTracker)
+		{
+			GS()->EntityManager()->HealingRift(FinalClientID, FinalPosition, 120.f, 320.f, Lifetime, 1.5f, 2, HealingPerPulse, 10, 6, pFinalSkillTracker);
+		};
+
+		// start casting
+		GS()->EntityManager()->StartUniversalCast(ClientID, PlayerPosition, NumCastClicked, FuncExecuteHealingRift, &pEntSkillPtr);
 		GS()->CreateSound(PlayerPosition, SOUND_SKILL_START);
 		return true;
 	}
@@ -282,7 +333,7 @@ bool CSkill::IsActivated(CCharacter* pChar, int Manacost, int SkillID, int Skill
 	// reset skill when use
 	if(SkillUsage == SKILL_USAGE_RESET)
 	{
-		if(pChar->TryUseMana(Manacost))
+		if(!pChar->TryUseMana(Manacost))
 			return false;
 
 		if(const auto groupPtr = skillEntityPtr.lock())
@@ -301,14 +352,14 @@ bool CSkill::IsActivated(CCharacter* pChar, int Manacost, int SkillID, int Skill
 			return false;
 		}
 
-		if(pChar->TryUseMana(Manacost))
+		if(!pChar->TryUseMana(Manacost))
 			return false;
 
 		GS()->Broadcast(m_ClientID, BroadcastPriority::GameWarning, 100, "The {} has been enabled!", Info()->GetName());
 		return true;
 	}
 
-	return !pChar->TryUseMana(Manacost);
+	return pChar->TryUseMana(Manacost);
 }
 
 bool CSkill::Upgrade()

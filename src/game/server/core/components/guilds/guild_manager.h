@@ -11,7 +11,9 @@ class CGuildManager : public MmoComponent
 	~CGuildManager() override
 	{
 		// free data
-		mystd::freeContainer(CGuildHouse::Data(), CGuild::Data(), CGuildWarHandler::Data());
+		mystd::freeContainer(CGuild::Data());
+		mystd::freeContainer(CGuildHouse::Data());
+		mystd::freeContainer(CGuildWarHandler::Data());
 	};
 
 	void OnPreInit() override;
@@ -22,7 +24,7 @@ class CGuildManager : public MmoComponent
 	bool OnPlayerMotdCommand(CPlayer* pPlayer, CMotdPlayerData* pMotdData, const char* pCmd) override;
 	bool OnSendMenuVotes(CPlayer* pPlayer, int Menulist) override;
 	bool OnSendMenuMotd(CPlayer* pPlayer, int Menulist) override;
-	void OnTimePeriod(ETimePeriod Period) override;
+	void OnGlobalTimePeriod(ETimePeriod Period) override;
 
 	void InitWars() const;
 

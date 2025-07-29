@@ -53,6 +53,8 @@ public:
 	virtual int GetClientVersion(int ClientID) const = 0;
 	virtual int SendMsg(CMsgPacker *pMsg, int Flags, int ClientID, int64_t Mask = -1, int WorldID = -1) = 0;
 	virtual int SendMotd(int ClientID, const char* pText) = 0;
+	virtual void SetSpectatorID(int ClientID, int SpectatorID) = 0;
+	virtual int GetSpectatorID(int ClientID) const = 0;
 
 	bool Translate(int& Target, int Client)
 	{
@@ -60,17 +62,16 @@ public:
 			return true;
 
 		int* pMap = GetIdMap(Client);
-		bool Found = false;
 		for(int i = MAX_PLAYERS; i < VANILLA_MAX_CLIENTS; i++)
 		{
 			if(Target == pMap[i])
 			{
 				Target = i;
-				Found = true;
-				break;
+				return true;
 			}
 		}
-		return Found;
+
+		return false;
 	}
 
 	bool ReverseTranslate(int& Target, int Client)
@@ -182,6 +183,7 @@ public:
 	virtual CWorldDetail* GetWorldDetail(int WorldID) = 0;
 	virtual bool IsWorldType(int WorldID, WorldType Type) const = 0;
 	virtual int GetWorldsSize() const = 0;
+	virtual int GetClientsCountByWorld(int WorldID) const = 0;
 
 	virtual const char* Localize(int ClientID, const char* pText) = 0;
 	virtual void SetClientLanguage(int ClientID, const char* pLanguage) = 0;
@@ -242,7 +244,7 @@ public:
 	virtual void OnClientPrepareChangeWorld(int ClientID) = 0;
 
 	virtual void OnClientConnected(int ClientID) = 0;
-	virtual void OnClientEnter(int ClientID) = 0;
+	virtual void OnClientEnter(int ClientID, bool FirstEnter) = 0;
 	virtual void OnClientDrop(int ClientID, const char *pReason) = 0;
 	virtual void OnClientDirectInput(int ClientID, void *pInput) = 0;
 	virtual void OnClientPredictedInput(int ClientID, void *pInput) = 0;
@@ -264,7 +266,7 @@ namespace Instance
 	struct Data { inline static class IServer* g_pServer; };
 	static inline IServer* Server() { return Data::g_pServer; }
 	static inline IGameServer* GameServerPlayer(int ClientID = -1) { return Data::g_pServer->GameServerPlayer(ClientID); }
-	static inline IGameServer* GameServer(int WorldID = MAIN_WORLD_ID) { return Data::g_pServer->GameServer(WorldID); }
+	static inline IGameServer* GameServer(int WorldID = INITIALIZER_WORLD_ID) { return Data::g_pServer->GameServer(WorldID); }
 	static inline const char* Localize(int ClientID, const char* pText) { return Data::g_pServer->Localize(ClientID, pText); }
 };
 

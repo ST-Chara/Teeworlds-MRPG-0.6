@@ -14,8 +14,10 @@ class CCharacterBotAI : public CCharacter
 	CPlayerBot* m_pBotPlayer{};
 
 	int m_MoveTick{};
+	int m_StrafeDirection {};
+	int m_LastStrafeChangeTick {};
+	int m_IntervalChangeWeapon {};
 	int m_PrevDirection{};
-	vec2 m_PrevPos{};
 	vec2 m_DieForce {};
 	std::optional<int> m_ForcedActiveWeapon {};
 	ska::unordered_set< int > m_aListDmgPlayers{};
@@ -33,7 +35,7 @@ private:
 	void TickDeferred() override;
 	void Snap(int SnappingClient) override;
 	void GiveRandomEffects(int ClientID) override;
-	bool TakeDamage(vec2 Force, int Dmg, int From, int Weapon) override;
+	bool TakeDamage(vec2 Force, int Dmg, int From, int Weapon, int ForceFlag = -1) override;
 	void Die(int Killer, int Weapon) override;
 	void HandleTuning() override;
 	void ProcessBot();

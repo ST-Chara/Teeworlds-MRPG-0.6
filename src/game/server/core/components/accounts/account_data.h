@@ -39,11 +39,23 @@ class CAccountData
 	PrisonManager m_PrisonManager{};
 	BigInt m_Bank {};
 	RatingSystem m_RatingSystem{};
+	EquippedSlots m_EquippedSlots {};
 
 	CGS* GS() const;
 	CPlayer* GetPlayer() const;
 
 public:
+	// main
+	struct TimePeriods
+	{
+		time_t m_DailyStamp { };
+		time_t m_WeekStamp { };
+		time_t m_MonthStamp { };
+	};
+	TimePeriods m_Periods {};
+	CTeeInfo m_TeeInfos {};
+	std::list< int > m_aHistoryWorld {};
+	static std::map < int, CAccountData > ms_aData;
 
 	PrisonManager& GetPrisonManager() { return m_PrisonManager; }
 	const PrisonManager& GetPrisonManager() const { return m_PrisonManager; }
@@ -54,10 +66,10 @@ public:
 	RatingSystem& GetRatingSystem() { return m_RatingSystem; }
 	const RatingSystem& GetRatingSystem() const { return m_RatingSystem; }
 
-	void ChangeProfession(ProfessionIdentifier Profession)
-	{
-		m_pActiveProfession = GetProfession(Profession);
-	}
+	EquippedSlots& GetEquippedSlots() { return m_EquippedSlots; }
+	const EquippedSlots& GetEquippedSlots() const { return m_EquippedSlots; }
+
+	void ChangeProfession(ProfessionIdentifier Profession);
 
 	CProfession* GetActiveProfession() const
 	{
@@ -91,6 +103,8 @@ public:
 	 */
 	void Init(int ID, int ClientID, const char* pLogin, std::string Language, std::string LoginDate, ResultPtr pResult);
 	void InitProfessions();
+	void InitSharedEquipments(const std::string& EquippedSlots);
+	void SaveSharedEquipments();
 	int GetID() const { return m_ID; }
 
 	/*
@@ -156,12 +170,12 @@ public:
 	BigInt GetTotalGold() const;
 	int GetGoldCapacity() const;
 
-	void AddExperience(uint64_t Value) const;
+	void AddExperience(uint64_t Value, bool ApplyBonuses = true) const;
 	void AddGold(int Value, bool ApplyBonuses = false);
 	void AddGoldToBank(int Amount);
 	bool RemoveGoldFromBank(int Amount);
 	bool SpendCurrency(int Price, int CurrencyItemID = 1); // Returns a boolean value indicating whether the currency was successfully spent or not.
-	void HandleChair(uint64_t Exp, int Gold);
+	void HandleChair(int Level);
 
 	// Achievements
 	void InitAchievements(const std::string& Data);
@@ -174,22 +188,21 @@ public:
 	void RemoveAether(int AetherID) { m_aAetherLocation.erase(AetherID); }
 	ska::unordered_set< int >& GetAethers() { return m_aAetherLocation; }
 
-	struct TimePeriods
-	{
-		time_t m_DailyStamp { };
-		time_t m_WeekStamp { };
-		time_t m_MonthStamp { };
-	};
+	// Equipments
+	void AutoEquipSlots(bool OnlyEmptySlots);
+	bool EquipItem(int ItemID);
+	bool UnequipItem(int ItemID);
+	bool IsAvailableEquipmentSlot(ItemType Type);
+	std::optional<int> GetEquippedSlotItemID(ItemType Type) const;
 
-	// main
-	TimePeriods m_Periods {};
-	std::list< int > m_aHistoryWorld {};
-
-	CTeeInfo m_TeeInfos {};
-	static std::map < int, CAccountData > ms_aData;
+	//
+	int GetFreeSlotsAttributedModules() const;
+	int GetFreeSlotsFunctionalModules() const;
+	int GetUsedSlotsAttributedModules() const { return g_Config.m_SvAttributedModulesSlots - GetFreeSlotsAttributedModules(); }
+	int GetUsedSlotsFunctionalModules() const { return g_Config.m_SvNonAttributedModulesSlots - GetFreeSlotsFunctionalModules(); }
 };
 
-struct CAccountTempData
+struct CAccountSharedData
 {
 	int m_LastKilledByWeapon;
 	CAuctionSlot m_TempAuctionSlot;
@@ -199,13 +212,13 @@ struct CAccountTempData
 	char m_aPlayerSearchBuf[32];
 
 	// player stats
-	int m_TempHealth;
-	int m_TempMana;
-	int m_TempPing;
+	int m_Health;
+	int m_Mana;
+	int m_Ping;
 
 	// dungeon
-	int m_TempTimeDungeon;
-	bool m_TempDungeonReady;
+	int m_TempStartDungeonTick {};
+	bool m_TempDungeonReady {};
 
 	void SetSpawnPosition(vec2 Position)
 	{
@@ -222,7 +235,7 @@ struct CAccountTempData
 		m_TempSpawnPos = std::nullopt;
 	}
 
-	static std::map < int, CAccountTempData > ms_aPlayerTempData;
+	static std::map < int, CAccountSharedData > ms_aPlayerSharedData;
 
 private:
 	std::optional<vec2> m_TempSpawnPos{};

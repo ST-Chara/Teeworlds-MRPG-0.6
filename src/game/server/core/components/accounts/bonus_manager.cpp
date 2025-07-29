@@ -135,7 +135,7 @@ void BonusManager::PostTick()
 		if(!it->IsActive())
 		{
 			CGS* pGS = (CGS*)Instance::GameServerPlayer(m_ClientID);
-			pGS->Chat(m_ClientID, "Your '{}' of '{~.2f}%' has expired.", GetStringBonusType(it->Type), it->Amount);
+			pGS->Chat(m_ClientID, "Your '{}' of '{~.2}%' has expired.", GetStringBonusType(it->Type), it->Amount);
 			it = m_vTemporaryBonuses.erase(it);
 			hasChanges = true;
 		}
@@ -165,24 +165,23 @@ float BonusManager::GetTotalBonusPercentage(int bonusType) const
 	return totalPercentage;
 }
 
-std::pair<int, std::string> BonusManager::GetBonusActivitiesString() const
+std::string BonusManager::GetBonusActivitiesString() const
 {
-	std::pair<int, std::string> bonusActivities{};
+	std::string resultStr{};
 	int bonusesInLine = 0;
 
 	for(int bonusType = BONUS_TYPE_EXPERIENCE; bonusType <= END_BONUS_TYPE; ++bonusType)
 	{
 		if(const int bonusPercentage = (int)GetTotalBonusPercentage(bonusType); bonusPercentage > 0)
 		{
-			if(!bonusActivities.second.empty() && bonusesInLine >= 2)
+			if(!resultStr.empty() && bonusesInLine >= 2)
 			{
-				bonusActivities.second += "\n";
-				bonusActivities.first += 1;
+				resultStr += "\n";
 				bonusesInLine = 0;
 			}
-			else if(!bonusActivities.second.empty())
+			else if(!resultStr.empty())
 			{
-				bonusActivities.second += ", ";
+				resultStr += ", ";
 			}
 
 			std::string bonusName;
@@ -195,10 +194,10 @@ std::pair<int, std::string> BonusManager::GetBonusActivitiesString() const
 				default: bonusName = "Unknown"; break;
 			}
 
-			bonusActivities.second += bonusName + " +" + std::to_string(bonusPercentage) + "%";
+			resultStr += bonusName + " +" + std::to_string(bonusPercentage) + "%";
 			++bonusesInLine;
 		}
 	}
 
-	return bonusActivities;
+	return resultStr;
 }

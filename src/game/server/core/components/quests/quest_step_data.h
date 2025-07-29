@@ -15,6 +15,9 @@ class CPlayer;
 class CQuestStepBase
 {
 public:
+	CQuestStepBase() = default;
+	virtual ~CQuestStepBase() = default;
+
 	QuestBotInfo m_Bot{};
 	virtual void UpdateBot() const;
 
@@ -46,14 +49,14 @@ public:
 		m_aMobProgress.clear();
 		m_aMoveActionProgress.clear();
 	}
-	~CQuestStep();
+	~CQuestStep() override final;
 
 	std::unordered_map < int /*BotID*/, MobProgressStatus/*MobProgressStatus*/ > m_aMobProgress { };
 	std::deque < bool /* State */ > m_aMoveActionProgress { };
 
 	int m_ClientID {};
 	bool m_StepComplete{};
-	bool m_ClientQuitting{};
+	bool m_MarkedForDestroy{};
 	bool m_TaskListReceived{};
 
 	bool IsComplete();
@@ -69,6 +72,7 @@ public:
 	void UpdateObjectives();
 	void Update();
 
+	void MarkForDestroy();
 	void ClearObjectives();
 
 	int GetMoveActionCurrentStepPos() const;

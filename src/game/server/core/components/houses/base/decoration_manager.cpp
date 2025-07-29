@@ -56,7 +56,7 @@ static bool DrawboardToolEventCallback(DrawboardToolEvent Event, CPlayer* pPlaye
 	if(Event == DrawboardToolEvent::OnUpdate)
 	{
 		const auto MousePos = pPlayer->GetCharacter()->GetMousePos();
-		const auto optNumber = pManager->GS()->Collision()->GetSwitchTileNumberAtIndex(MousePos, TILE_SW_HOUSE_ZONE);
+		const auto optNumber = pManager->GS()->Collision()->GetSwitchTileNumberAtTileIndex(MousePos, TILE_SW_HOUSE_ZONE);
 
 		if(!optNumber || (*optNumber != pHouse->GetID()))
 		{
@@ -136,9 +136,8 @@ bool CDecorationManager::EndDrawing(CPlayer* pPlayer)
 
 bool CDecorationManager::HasFreeSlots() const
 {
-	const auto& sizePoints = m_pDrawBoard->GetEntityPoints().size();
-	const auto& maxPoints = (size_t)MAX_DECORATIONS_PER_HOUSE;
-
+	const int sizePoints = m_pDrawBoard->GetEntityPoints().size();
+	const int maxPoints = m_pHouse->GetMaxDecorationSlots();
 	return sizePoints < maxPoints;
 }
 

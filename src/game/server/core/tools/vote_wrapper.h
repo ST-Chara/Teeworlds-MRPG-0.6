@@ -51,8 +51,9 @@ public:
 	char m_aDescription[VOTE_DESC_LENGTH] {};
 	char m_aCommand[VOTE_CMD_LENGTH] {};
 	int m_Depth {};
-	int m_Extra1 { -1 };
-	int m_Extra2 { -1 };
+	int m_Extra1 { NOPE };
+	int m_Extra2 { NOPE };
+	int m_SortPriority { NOPE };
 	bool m_Line { false };
 	bool m_Title { false };
 	VoteOptionCallback m_Callback {};
@@ -101,6 +102,18 @@ class CVoteGroup
 	void AddBackpageImpl();
 	void AddItemValueImpl(int ItemID);
 
+	template<typename F> requires std::predicate<F, const CVoteOption&, const CVoteOption&>
+	void Sort(F&& Comparator)
+	{
+		if(!m_vpVotelist.empty())
+			std::sort(m_vpVotelist.begin() + (m_HasTitle ? 1 : 0), m_vpVotelist.end(), std::forward<F>(Comparator));
+	}
+
+	void SetLastVoteSortPriority(int Priority)
+	{
+		if(!m_vpVotelist.empty())
+			m_vpVotelist.back().m_SortPriority = Priority;
+	}
 };
 
 #define FMT_LOCALIZE_STR(clientid, text, args) fmt_localize(clientid, text, args).c_str()
@@ -269,35 +282,50 @@ public:
 		m_pGroup->SetLastVoteCallback(CallbackImpl, pUser);
 		return *this;
 	}
-	
+
 	static void AddLine(int ClientID) noexcept
 	{
 		const auto pVoteGroup = new CVoteGroup(ClientID, VWF_DISABLED);
 		pVoteGroup->AddLineImpl();
 		m_pData[ClientID].push_back(pVoteGroup);
 	}
-	
+
 	static void AddBackpage(int ClientID) noexcept
 	{
 		const auto pVoteGroup = new CVoteGroup(ClientID, VWF_DISABLED);
 		pVoteGroup->AddBackpageImpl();
 		m_pData[ClientID].push_back(pVoteGroup);
 	}
-	
+
 	static void AddEmptyline(int ClientID) noexcept
 	{
 		const auto pVoteGroup = new CVoteGroup(ClientID, VWF_DISABLED);
 		pVoteGroup->AddEmptylineImpl();
 		m_pData[ClientID].push_back(pVoteGroup);
 	}
-	
+
 	static void AddItemValue(int ClientID, int ItemID) noexcept
 	{
 		const auto pVoteGroup = new CVoteGroup(ClientID, VWF_DISABLED);
 		pVoteGroup->AddItemValueImpl(ItemID);
 		m_pData[ClientID].push_back(pVoteGroup);
 	}
-	
+
+	template<typename F> requires std::predicate<F, const CVoteOption&, const CVoteOption&>
+	VoteWrapper& Sort(F&& Comparator)
+	{
+		if(m_pGroup)
+			m_pGroup->Sort(std::forward<F>(Comparator));
+		return *this;
+	}
+
+	VoteWrapper& SetSortPriority(int Priority) noexcept
+	{
+		if(m_pGroup)
+			m_pGroup->SetLastVoteSortPriority(Priority);
+		return *this;
+	}
+
 	static void RebuildVotes(int ClientID);
 	static CVoteOption* GetOptionVoteByAction(int ClientID, const char* pActionName);
 };
@@ -320,6 +348,7 @@ class CVotePlayerData
 	int m_CurrentMenuID{};
 	std::optional<int> m_ExtraID {};
 	std::thread m_VoteUpdater {};
+	mystd::string_mapper<int> m_StringMapper {};
 	enum class STATE_UPDATER { WAITING, RUNNING, DONE };
 	std::atomic<STATE_UPDATER> m_VoteUpdaterStatus{ STATE_UPDATER::WAITING };
 	ska::unordered_map<int, ska::unordered_map<int, VoteGroupHidden>> m_aHiddenGroup{};
@@ -327,7 +356,6 @@ class CVotePlayerData
 	VoteGroupHidden* EmplaceHidden(int ID, int Type);
 	VoteGroupHidden* GetHidden(int ID);
 	void ResetHidden(int MenuID);
-	void ResetHidden() { ResetHidden(m_CurrentMenuID); }
 	static void ThreadVoteUpdater(CVotePlayerData* pData);
 
 public:
@@ -346,6 +374,7 @@ public:
 		m_pGS = nullptr;
 		m_pPlayer = nullptr;
 		m_aHiddenGroup.clear();
+		m_StringMapper.clear();
 	}
 
 	void Init(CGS* pGS, CPlayer* pPlayer)
@@ -359,7 +388,9 @@ public:
 	void UpdateVotesIf(int MenuID);
 	void UpdateCurrentVotes() { UpdateVotes(m_CurrentMenuID); }
 	void ClearVotes() const;
+	void ResetHidden() { ResetHidden(m_CurrentMenuID); }
 	void ResetExtraID() { m_ExtraID.reset(); }
+	mystd::string_mapper<int>& GetStringMapper() { return m_StringMapper; }
 
 	void SetCurrentMenuID(int MenuID) { m_CurrentMenuID = MenuID; }
 	int GetCurrentMenuID() const { return m_CurrentMenuID; }

@@ -1,6 +1,8 @@
 #ifndef GAME_SERVER_CORE_COMPONENTS_ACCOUNTS_PROFESSION_H
 #define GAME_SERVER_CORE_COMPONENTS_ACCOUNTS_PROFESSION_H
 
+#include "equipped_slots.h"
+
 class CGS;
 class CPlayer;
 
@@ -23,8 +25,9 @@ protected:
 	CGS* GS() const;
 	CPlayer* GetPlayer() const;
 	std::unordered_map<AttributeIdentifier, int> m_Attributes {};
-	std::unordered_map<AttributeIdentifier, float> m_ExtraBoost {};
+	std::unordered_map<AttributeIdentifier, float> m_Amplifier {};
 	CTeeInfo m_ProfessionSkin {};
+	EquippedSlots m_EquippedSlots {};
 
 public:
 	CProfession(ProfessionIdentifier ProfID, int ProfessionType);
@@ -43,8 +46,11 @@ public:
 	bool IsProfessionType(int ProfessionType) const { return m_ProfessionType == ProfessionType; }
 	const std::unordered_map<AttributeIdentifier, int>& GetAttributes() const { return m_Attributes; }
 	int GetAttributeValue(AttributeIdentifier ID) const { return m_Attributes.contains(ID) ? m_Attributes.at(ID) : 0; }
-	float GetExtraBoostAttribute(AttributeIdentifier ID) const { return m_ExtraBoost.contains(ID) ? m_ExtraBoost.at(ID) : .0f; }
+	const std::unordered_map<AttributeIdentifier, float>& GetAmplifiers() const { return m_Amplifier; }
+	float GetAmplifier(AttributeIdentifier ID) const { return m_Amplifier.contains(ID) ? m_Amplifier.at(ID) : .0f; }
 	const CTeeInfo& GetTeeInfo() const { return m_ProfessionSkin; }
+	EquippedSlots& GetEquippedSlots() { return m_EquippedSlots; }
+	void ResetUpgrades();
 
 private:
 	std::string GetPreparedJsonString() const;
@@ -63,9 +69,16 @@ public:
 		m_Attributes[AttributeIdentifier::Lucky] = 0;
 
 		// extra boost for profession
-		m_ExtraBoost[AttributeIdentifier::HP] = 30.f;
-		m_ExtraBoost[AttributeIdentifier::MP] = 5.f;
-		m_ExtraBoost[AttributeIdentifier::DMG] = 10.f;
+		m_Amplifier[AttributeIdentifier::HP] = 15.f;
+
+		// equip slots
+		m_EquippedSlots.initSlot(ItemType::EquipHammer);
+		m_EquippedSlots.initSlot(ItemType::EquipGun);
+		m_EquippedSlots.initSlot(ItemType::EquipShotgun);
+		m_EquippedSlots.initSlot(ItemType::EquipGrenade);
+		m_EquippedSlots.initSlot(ItemType::EquipLaser);
+		m_EquippedSlots.initSlot(ItemType::EquipArmorTank);
+		m_EquippedSlots.initSlot(ItemType::EquipHelmetTank);
 
 		// profession skin
 		m_ProfessionSkin.m_UseCustomColor = 0;
@@ -86,13 +99,20 @@ public:
 		m_Attributes[AttributeIdentifier::AttackSPD] = 0;
 
 		// extra boost for profession
-		m_ExtraBoost[AttributeIdentifier::HP] = 5.f;
-		m_ExtraBoost[AttributeIdentifier::MP] = 15.f;
-		m_ExtraBoost[AttributeIdentifier::DMG] = 30.f;\
+		m_Amplifier[AttributeIdentifier::DMG] = 15.f;
+
+		// equip slots
+		m_EquippedSlots.initSlot(ItemType::EquipHammer);
+		m_EquippedSlots.initSlot(ItemType::EquipGun);
+		m_EquippedSlots.initSlot(ItemType::EquipShotgun);
+		m_EquippedSlots.initSlot(ItemType::EquipGrenade);
+		m_EquippedSlots.initSlot(ItemType::EquipLaser);
+		m_EquippedSlots.initSlot(ItemType::EquipArmorDPS);
+		m_EquippedSlots.initSlot(ItemType::EquipHelmetDPS);
 
 		// profession skin
 		m_ProfessionSkin.m_UseCustomColor = 0;
-		str_copy(m_ProfessionSkin.m_aSkinName, "Empieza", sizeof(m_ProfessionSkin.m_aSkinName));
+		str_copy(m_ProfessionSkin.m_aSkinName, "flokes", sizeof(m_ProfessionSkin.m_aSkinName));
 	}
 };
 
@@ -110,13 +130,20 @@ public:
 		m_Attributes[AttributeIdentifier::Vampirism] = 0;
 
 		// extra boost for profession
-		m_ExtraBoost[AttributeIdentifier::HP] = 15.f;
-		m_ExtraBoost[AttributeIdentifier::MP] = 30.f;
-		m_ExtraBoost[AttributeIdentifier::DMG] = 5.f;
+		m_Amplifier[AttributeIdentifier::MP] = 15.f;
+
+		// equip slots
+		m_EquippedSlots.initSlot(ItemType::EquipHammer);
+		m_EquippedSlots.initSlot(ItemType::EquipGun);
+		m_EquippedSlots.initSlot(ItemType::EquipShotgun);
+		m_EquippedSlots.initSlot(ItemType::EquipGrenade);
+		m_EquippedSlots.initSlot(ItemType::EquipLaser);
+		m_EquippedSlots.initSlot(ItemType::EquipArmorHealer);
+		m_EquippedSlots.initSlot(ItemType::EquipHelmetHealer);
 
 		// profession skin
 		m_ProfessionSkin.m_UseCustomColor = 0;
-		str_copy(m_ProfessionSkin.m_aSkinName, "flokes", sizeof(m_ProfessionSkin.m_aSkinName));
+		str_copy(m_ProfessionSkin.m_aSkinName, "Empieza", sizeof(m_ProfessionSkin.m_aSkinName));
 	}
 };
 
@@ -131,6 +158,9 @@ public:
 	{
 		// availables for upgrades
 		m_Attributes[AttributeIdentifier::Extraction] = 1;
+
+		// equip slots
+		m_EquippedSlots.initSlot(ItemType::EquipRake);
 	}
 };
 
@@ -145,6 +175,9 @@ public:
 	{
 		// availables for upgrades
 		m_Attributes[AttributeIdentifier::Efficiency] = 1;
+
+		// equip slots
+		m_EquippedSlots.initSlot(ItemType::EquipPickaxe);
 	}
 };
 
@@ -159,6 +192,26 @@ public:
 	{
 		// availables for upgrades
 		m_Attributes[AttributeIdentifier::Patience] = 1;
+
+		// equip slots
+		m_EquippedSlots.initSlot(ItemType::EquipFishrod);
+	}
+};
+
+/*
+ * Loader profession
+ */
+class CLoaderProfession : public CProfession
+{
+public:
+	CLoaderProfession()
+		: CProfession(ProfessionIdentifier::Loader, PROFESSION_TYPE_OTHER)
+	{
+		// availables for upgrades
+		m_Attributes[AttributeIdentifier::ProductCapacity] = 1;
+
+		// equip slots
+		m_EquippedSlots.initSlot(ItemType::EquipGloves);
 	}
 };
 

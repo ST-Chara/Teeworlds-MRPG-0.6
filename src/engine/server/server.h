@@ -101,6 +101,7 @@ public:
 		int m_WorldID;
 		int m_OldWorldID;
 		bool m_ChangeWorld;
+		int m_SpectatorID;
 
 		int m_NextMapChunk;
 		bool m_Quitting;
@@ -206,6 +207,9 @@ public:
 	int GetClientInfo(int ClientID, CClientInfo* pInfo) const override;
 	void GetClientAddr(int ClientID, char* pAddrStr, int Size) const override;
 
+	void SetSpectatorID(int ClientID, int SpectatorID) override;
+	int GetSpectatorID(int ClientID) const override;
+
 	void SetStateClientMRPG(int ClientID, bool State) override;
 	bool GetStateClientMRPG(int ClientID) const override;
 
@@ -214,6 +218,7 @@ public:
 	int ClientCountry(int ClientID) const override;
 	bool ClientIngame(int ClientID) const override;
 	int GetClientLatency(int ClientID) const override;
+	int GetClientsCountByWorld(int WorldID) const override;
 
 	int GetClientVersion(int ClientID) const override;
 	int SendMsg(CMsgPacker* pMsg, int Flags, int ClientID, int64_t Mask = -1, int WorldID = -1) override;
@@ -297,7 +302,7 @@ private:
 		std::string Nickname {};
 		int Rating {};
 
-		bool operator<(const BaseAccount& other) const 
+		bool operator<(const BaseAccount& other) const
 		{
 			return Rating > other.Rating;
 		}

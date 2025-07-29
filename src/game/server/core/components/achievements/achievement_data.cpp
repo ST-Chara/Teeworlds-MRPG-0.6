@@ -27,7 +27,7 @@ bool CAchievementInfo::IsCompleted(int Criteria, const CAchievement* pAchievemen
 	{
 		// achievements that require minimal progress (just having progress)
 		case AchievementType::Equip:
-		case AchievementType::UnlockWorld:
+		case AchievementType::CompleteQuest:
 			return pAchievement->m_Progress > 0;
 
 		// achievements that require a specific number of actions or conditions to be met
@@ -96,16 +96,21 @@ bool CAchievement::UpdateProgress(int Criteria, int Progress, int ProgressType)
 void CAchievement::RewardPlayer() const
 {
 	CPlayer* pPlayer = GetPlayer();
-	const auto& JsonData = m_pInfo->GetRewardData();
+	const auto& dataJson = m_pInfo->GetRewardData();
 
 	// json reward
-	if(!JsonData.empty())
+	if(!dataJson.empty())
 	{
-		if(const int Experience = JsonData.value("exp", 0); Experience > 0)
+		if(const int Experience = dataJson.value("exp", 0); Experience > 0)
 			pPlayer->Account()->AddExperience(Experience);
 
-		for(const CItemsContainer Items = CItem::FromArrayJSON(JsonData, "items"); auto & Item : Items)
-			pPlayer->GetItem(Item)->Add(Item.GetValue());
+		// initilize reward items
+		CItemsContainer vItems = dataJson.value("items", CItemsContainer {});
+		for(const auto& item : vItems)
+		{
+			if(item.IsValid())
+				pPlayer->GetItem(item)->Add(item.GetValue());
+		}
 	}
 
 	// achievement points

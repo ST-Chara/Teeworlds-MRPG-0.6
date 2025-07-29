@@ -4,7 +4,7 @@
 #include <game/server/gamecontext.h>
 #include <game/server/core/components/mails/mail_wrapper.h>
 
-CGS* CGuild::GS() const { return (CGS*)Instance::GameServerPlayer(m_pHouse != nullptr ? m_pHouse->GetWorldID() : MAIN_WORLD_ID); }
+CGS* CGuild::GS() const { return (CGS*)Instance::GameServerPlayer(m_pHouse != nullptr ? m_pHouse->GetWorldID() : INITIALIZER_WORLD_ID); }
 
 CGuild::~CGuild()
 {
@@ -19,7 +19,7 @@ bool CGuild::Upgrade(GuildUpgrade Type)
 	auto* pUpgradeField = &m_UpgradesData.getField<int>((int)Type);
 
 	// check maximum for available slots
-	if(Type == GuildUpgrade::AvailableSlots && pUpgradeField->m_Value >= GUILD_MAX_SLOTS)
+	if(pUpgradeField->m_Value >= pUpgradeField->m_MaxValue)
 		return false;
 
 	const int Price = GetUpgradePrice(Type);
@@ -157,19 +157,22 @@ void CGuild::HandleTimePeriod(ETimePeriod Period)
 	// rent paid
 	if(Period == DAILY_STAMP && HasHouse())
 	{
-		// can pay
-		if(m_pHouse->ReduceRentDays(1))
+		const auto Result = m_pHouse->ReduceRentDays(1);
+
+		if(Result)
 		{
+			// payment
 			GS()->ChatGuild(m_ID, "Your guild house rent has been paid.");
 			m_pLogger->Add(LOGFLAG_HOUSE_MAIN_CHANGES, "House rent has been paid.");
-			return;
 		}
-
-		// can't pay, so sell the house
-		SellHouse();
-		GS()->ChatGuild(m_ID, "Your guild house rent has expired, has been sold.");
-		m_pLogger->Add(LOGFLAG_HOUSE_MAIN_CHANGES, "House rent has expired, has been sold.");
-		GS()->UpdateVotesIfForAll(MENU_GUILD);
+		else
+		{
+			// expired
+			SellHouse();
+			GS()->ChatGuild(m_ID, "Your guild house rent has expired, has been sold.");
+			m_pLogger->Add(LOGFLAG_HOUSE_MAIN_CHANGES, "House rent has expired, has been sold.");
+			GS()->UpdateVotesIfForAll(MENU_GUILD);
+		}
 	}
 
 	// reset members deposits
@@ -194,20 +197,27 @@ bool CGuild::StartWar(CGuild* pTargetGuild)
 
 int CGuild::GetUpgradePrice(GuildUpgrade Type)
 {
-	int EndPrice = 0;
+	int TotalPrice = 0;
+	const int CurrentPoint = m_UpgradesData.getRef<int>((int)Type);
 
-	if(Type == GuildUpgrade::AvailableSlots)
+	switch(Type)
 	{
-		const int CurrentPoint = m_UpgradesData.getRef<int>((int)GuildUpgrade::AvailableSlots);
-		EndPrice = CurrentPoint * g_Config.m_SvGuildSlotUpgradePrice;
-	}
-	else
-	{
-		const int CurrentPoint = m_UpgradesData.getRef<int>((int)Type);
-		EndPrice = CurrentPoint * g_Config.m_SvGuildAnotherUpgradePrice;
+		case GuildUpgrade::DoorHealth:
+		case GuildUpgrade::DecorationSlots:
+			TotalPrice = CurrentPoint * g_Config.ms_SvGuildLowUpgradePrice;
+			break;
+
+		case GuildUpgrade::AvailableSlots:
+			TotalPrice = CurrentPoint * g_Config.m_SvGuildMediumUpgradePrice;
+			break;
+
+		default:
+		case GuildUpgrade::ChairLevel:
+			TotalPrice = CurrentPoint * g_Config.m_SvGuildHighUpgradePrice;
+			break;
 	}
 
-	return EndPrice;
+	return TotalPrice;
 }
 
 bool CGuild::IsAccountMemberGuild(int AccountID)

@@ -9,7 +9,7 @@
 #include "base/door_manager.h"
 #include "base/decoration_manager.h"
 
-#include "../Inventory/ItemData.h"
+#include "../inventory/item_data.h"
 
 #define TW_HOUSES_TABLE "tw_houses"
 
@@ -77,12 +77,15 @@ public:
 	int GetWorldID() const { return m_WorldID; }
 	int GetRentPrice() const;
 	int GetRentDays() const { return m_RentDays; }
+	int GetMaxDecorationSlots() const override { return (int)MAX_DECORATIONS_PER_HOUSE; }
 
 	void InitComponents(const BigInt& Bank, const std::string& DoorsData, const std::string& FarmzonesData, const std::string& PropertiesData);
 	void Buy(CPlayer* pPlayer);
 	void Sell();
 	void UpdateText(int Lifetime) const;
+
 	bool ExtendRentDays(int Days);
+	bool ReduceRentDays(int Days);
 
 	void HandleTimePeriod(ETimePeriod Period);
 };

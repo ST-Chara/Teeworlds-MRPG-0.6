@@ -10,18 +10,21 @@
 #include "components/aethernet/aethernet_manager.h"
 #include "components/Bots/BotManager.h"
 #include "components/crafting/craft_manager.h"
-#include "components/dungeons/dungeon_manager.h"
+#include "components/duties/duties_manager.h"
 #include "components/Eidolons/EidolonManager.h"
 #include "components/groups/group_manager.h"
 #include "components/guilds/guild_manager.h"
 #include "components/houses/house_manager.h"
-#include "components/Inventory/InventoryManager.h"
+#include "components/inventory/inventory_manager.h"
 #include "components/mails/mailbox_manager.h"
 #include "components/quests/quest_manager.h"
 #include "components/skills/skill_manager.h"
 #include "components/warehouse/warehouse_manager.h"
 #include "components/wiki/wiki_manager.h"
 #include "components/worlds/world_manager.h"
+#include "components/accounts/account_listener.h"
+#include "components/inventory/inventory_listener.h"
+
 #include <teeother/components/localization.h>
 
 CMmoController::CMmoController(CGS* pGameServer) : m_pGameServer(pGameServer)
@@ -35,7 +38,7 @@ CMmoController::CMmoController(CGS* pGameServer) : m_pGameServer(pGameServer)
 	m_System.add(m_pWarehouseManager = new CWarehouseManager);
 	m_System.add(new CAuctionManager);
 	m_System.add(m_pEidolonManager = new CEidolonManager);
-	m_System.add(m_pDungeonManager = new CDungeonManager);
+	m_System.add(m_pDutiesManager = new CDutiesManager);
 	m_System.add(new CAethernetManager);
 	m_System.add(m_pWorldManager = new CWorldManager);
 	m_System.add(m_pHouseManager = new CHouseManager);
@@ -47,6 +50,7 @@ CMmoController::CMmoController(CGS* pGameServer) : m_pGameServer(pGameServer)
 	m_System.add(new CWikiManager);
 
 }
+
 
 void CMmoController::OnInit(IServer* pServer, IConsole* pConsole, IStorageEngine* pStorage)
 {
@@ -60,7 +64,7 @@ void CMmoController::OnInit(IServer* pServer, IConsole* pConsole, IStorageEngine
 		pComponent->m_pConsole = pConsole;
 		pComponent->m_pStorage = pStorage;
 
-		if(m_pGameServer->GetWorldID() == MAIN_WORLD_ID)
+		if(m_pGameServer->GetWorldID() == INITIALIZER_WORLD_ID)
 			pComponent->OnPreInit();
 
 		const auto selectStr = fmt_default("WHERE WorldID = '{}'", m_pGameServer->GetWorldID());
@@ -72,10 +76,12 @@ void CMmoController::OnInit(IServer* pServer, IConsole* pConsole, IStorageEngine
 
 	// log about listeners
 	if(isLastInitializedWorld)
+	{
 		g_EventListenerManager.LogRegisteredEvents();
-
-	SyncLocalizations();
+		std::thread(&CMmoController::SyncLocalizations, this).detach();
+	}
 }
+
 
 void CMmoController::OnConsoleInit(IConsole* pConsole) const
 {
@@ -86,14 +92,31 @@ void CMmoController::OnConsoleInit(IConsole* pConsole) const
 	}
 }
 
+
 void CMmoController::OnTick() const
 {
 	for(auto& pComponent : m_System.m_vComponents)
 		pComponent->OnTick();
 
-	if(GS()->Server()->Tick() % ((GS()->Server()->TickSpeed() * 60) * g_Config.m_SvTimePeriodCheckTime) == 0)
-		OnHandleTimePeriod();
+	// check time period
+	if(GS()->GetWorldID() == INITIALIZER_WORLD_ID &&
+		(GS()->Server()->Tick() % (GS()->Server()->TickSpeed() * g_Config.m_SvGlobalPeriodCheckInterval) == 0))
+	{
+		OnHandleGlobalTimePeriod();
+	}
+
+	// update player time period
+	if(GS()->Server()->Tick() % (GS()->Server()->TickSpeed() * g_Config.m_SvPlayerPeriodCheckInterval) == 0)
+	{
+		for(int i = 0; i < MAX_PLAYERS; ++i)
+		{
+			auto* pPlayer = GS()->GetPlayer(i, true);
+			if(pPlayer && GS()->IsPlayerInWorld(i))
+				OnHandlePlayerTimePeriod(pPlayer);
+		}
+	}
 }
+
 
 bool CMmoController::OnClientMessage(int MsgID, void* pRawMsg, int ClientID) const
 {
@@ -109,11 +132,13 @@ bool CMmoController::OnClientMessage(int MsgID, void* pRawMsg, int ClientID) con
 	return false;
 }
 
+
 void CMmoController::OnPlayerLogin(CPlayer* pPlayer) const
 {
 	for(const auto& pComponent : m_System.m_vComponents)
 		pComponent->OnPlayerLogin(pPlayer);
 }
+
 
 bool CMmoController::OnSendMenuMotd(CPlayer* pPlayer, int Menulist) const
 {
@@ -122,8 +147,10 @@ bool CMmoController::OnSendMenuMotd(CPlayer* pPlayer, int Menulist) const
 		if(pComponent->OnSendMenuMotd(pPlayer, Menulist))
 			return true;
 	}
+
 	return false;
 }
+
 
 bool CMmoController::OnSendMenuVotes(CPlayer* pPlayer, int Menulist) const
 {
@@ -138,6 +165,7 @@ bool CMmoController::OnSendMenuVotes(CPlayer* pPlayer, int Menulist) const
 
 		// Statistics menu
 		VoteWrapper VStatistics(ClientID, VWF_ALIGN_TITLE | VWF_STYLE_SIMPLE | VWF_SEPARATE, "Class profession: {}", pProfName);
+		VStatistics.Add("Discord: ({-})", g_Config.m_SvDiscordInviteLink);
 		VStatistics.Add("Level {}, Exp {}/{}", pPlayer->Account()->GetLevel(), pPlayer->Account()->GetExperience(), expForLevel);
 		VStatistics.Add("Gold: {$}, Bank: {$}", pPlayer->Account()->GetGold(), pPlayer->Account()->GetBankManager());
 		VStatistics.AddMenu(MENU_ACCOUNT_DETAIL_INFO, "\u2698 Detail information");
@@ -154,7 +182,7 @@ bool CMmoController::OnSendMenuVotes(CPlayer* pPlayer, int Menulist) const
 
 		// Group & Social
 		VoteWrapper VGroup(ClientID, VWF_ALIGN_TITLE, "\u2600 Social & Group Menu");
-		VGroup.AddMenu(MENU_DUNGEONS, "\u262C Dungeons");
+		VGroup.AddMenu(MENU_DUTIES_LIST, "\u262C Duties");
 		VGroup.AddMenu(MENU_GROUP, "\u2042 Group");
 		VGroup.AddMenu(MENU_GUILD_FINDER, "\u20AA Guild finder");
 		if(pPlayer->Account()->HasGuild())
@@ -187,13 +215,10 @@ bool CMmoController::OnSendMenuVotes(CPlayer* pPlayer, int Menulist) const
 	{
 		pPlayer->m_VotesData.SetLastMenuID(MENU_MAIN);
 
-		// information
-		VoteWrapper VTopInfo(ClientID, VWF_STYLE_STRICT_BOLD|VWF_SEPARATE, "Top List Information");
-		VTopInfo.Add("You can view the top 10 players and guilds.");
-		VoteWrapper::AddEmptyline(ClientID);
-
 		// select type list
-		VoteWrapper VTopSelect(ClientID, VWF_OPEN, "Select a type of ranking");
+		VoteWrapper VTopSelect(ClientID, VWF_SEPARATE_OPEN|VWF_ALIGN_TITLE|VWF_STYLE_STRICT_BOLD, "Select a type of ranking");
+		VTopSelect.AddMenu(MENU_LEADERBOARD, (int)ToplistType::PlayerExpert, "Top Specialists in the Realm");
+		VTopSelect.AddMenu(MENU_LEADERBOARD, (int)ToplistType::PlayerAttributes, "Top by attributes");
 		VTopSelect.AddMenu(MENU_LEADERBOARD, (int)ToplistType::GuildLeveling, "Top 10 guilds by leveling");
 		VTopSelect.AddMenu(MENU_LEADERBOARD, (int)ToplistType::GuildWealthy, "Top 10 guilds by wealthy");
 		VTopSelect.AddMenu(MENU_LEADERBOARD, (int)ToplistType::PlayerRating, "Top 10 players by rank points");
@@ -210,17 +235,16 @@ bool CMmoController::OnSendMenuVotes(CPlayer* pPlayer, int Menulist) const
 		return true;
 	}
 
-	// ----------------------------------------
-	// check append votes
+	// try send from other components
 	for(auto& pComponent : m_System.m_vComponents)
 	{
 		if(pComponent->OnSendMenuVotes(pPlayer, Menulist))
 			return true;
 	}
-	// ----------------------------------------
 
 	return false;
 }
+
 
 void CMmoController::OnCharacterTile(CCharacter* pChr) const
 {
@@ -231,8 +255,8 @@ void CMmoController::OnCharacterTile(CCharacter* pChr) const
 		pComponent->OnCharacterTile(pChr);
 }
 
-bool CMmoController::OnPlayerVoteCommand(CPlayer* pPlayer, const char* pCmd,
-	const int ExtraValue1, const int ExtraValue2, int ReasonNumber, const char* pReason) const
+
+bool CMmoController::OnPlayerVoteCommand(CPlayer* pPlayer, const char* pCmd, const int ExtraValue1, const int ExtraValue2, int ReasonNumber, const char* pReason) const
 {
 	if(!pPlayer)
 		return true;
@@ -244,6 +268,7 @@ bool CMmoController::OnPlayerVoteCommand(CPlayer* pPlayer, const char* pCmd,
 	}
 	return false;
 }
+
 
 bool CMmoController::OnPlayerMotdCommand(CPlayer* pPlayer, CMotdPlayerData* pMotdData, const char* pCmd) const
 {
@@ -258,74 +283,71 @@ bool CMmoController::OnPlayerMotdCommand(CPlayer* pPlayer, CMotdPlayerData* pMot
 	return false;
 }
 
+
 void CMmoController::OnResetClientData(int ClientID) const
 {
 	for(auto& pComponent : m_System.m_vComponents)
 		pComponent->OnClientReset(ClientID);
 }
 
-void CMmoController::OnHandleTimePeriod() const
+
+void CMmoController::OnHandleGlobalTimePeriod() const
 {
-	// Declare a current timestamp, byte array to store raw data
+	// initialize variables
 	ByteArray RawData {};
+	std::vector<int> aPeriodsUpdated {};
 	time_t CurrentTimeStamp = time(nullptr);
 
-	// Load the file "time_periods.cfg" and store the result in a variable
-	mystd::file::result Result = mystd::file::load("time_periods.cfg", &RawData);
+	// try open file
+	mystd::file::result Result = mystd::file::load("server_data/time_periods.cfg", &RawData);
 	if(Result == mystd::file::result::ERROR_FILE)
 	{
-		// Save the data to the file "time_periods.cfg"
-		std::string Data = std::to_string(CurrentTimeStamp) + "\n" + std::to_string(CurrentTimeStamp) + "\n" + std::to_string(CurrentTimeStamp);
-		mystd::file::save("time_periods.cfg", Data.data(), (unsigned)Data.size());
+		const auto Data = fmt_default("{}\n{}\n{}", CurrentTimeStamp, CurrentTimeStamp, CurrentTimeStamp);
+		mystd::file::save("server_data/time_periods.cfg", Data.data(), (unsigned)Data.size());
 		return;
 	}
 
-	// Declare variables to store timestamps for daily, weekly, and monthly data
+	// load time stamps
 	time_t DailyStamp, WeekStamp, MonthStamp;
-	std::string Data = std::string((char*)RawData.data(), RawData.size());
-#ifdef WIN32 // time_t is llu on windows and ld on linux
+	auto Data = std::string((char*)RawData.data(), RawData.size());
+#ifdef WIN32
 	std::sscanf(Data.c_str(), "%llu\n%llu\n%llu", &DailyStamp, &WeekStamp, &MonthStamp);
 #else
 	std::sscanf(Data.c_str(), "%ld\n%ld\n%ld", &DailyStamp, &WeekStamp, &MonthStamp);
 #endif
 
-	// Set a flag indicating whether time periods have been updated
-	std::vector<int> aPeriodsUpdated {};
-
-	// Check if the current time is a new day
+	// check new days
 	if(time_is_new_day(DailyStamp, CurrentTimeStamp))
 	{
 		DailyStamp = CurrentTimeStamp;
 		aPeriodsUpdated.push_back(DAILY_STAMP);
 	}
 
-	// Check if the current time is a new week
+	// check new week
 	if(time_is_new_week(WeekStamp, CurrentTimeStamp))
 	{
 		WeekStamp = CurrentTimeStamp;
 		aPeriodsUpdated.push_back(WEEK_STAMP);
 	}
 
-	// Check if the current time is a new month
+	// check new month
 	if(time_is_new_month(MonthStamp, CurrentTimeStamp))
 	{
 		MonthStamp = CurrentTimeStamp;
 		aPeriodsUpdated.push_back(MONTH_STAMP);
 	}
 
-	// If any time period has been updated
+	// if any time period has been updated
 	if(!aPeriodsUpdated.empty())
 	{
-		std::string Data = std::to_string(DailyStamp) + "\n" + std::to_string(WeekStamp) + "\n" + std::to_string(MonthStamp);
-		mystd::file::save("time_periods.cfg", Data.data(), (unsigned)Data.size());
-
-		// Check time periods for all components
+		Data = fmt_default("{}\n{}\n{}", DailyStamp, WeekStamp, MonthStamp);
+		mystd::file::save("server_data/time_periods.cfg", Data.data(), (unsigned)Data.size());
 		for(const auto& component : m_System.m_vComponents)
 		{
 			for(const auto& periods : aPeriodsUpdated)
 			{
-				ETimePeriod timePeriod = static_cast<ETimePeriod>(periods);
-				component->OnTimePeriod(timePeriod);
+				auto timePeriod = static_cast<ETimePeriod>(periods);
+				component->OnGlobalTimePeriod(timePeriod);
 			}
 		}
 	}
@@ -333,40 +355,35 @@ void CMmoController::OnHandleTimePeriod() const
 
 void CMmoController::OnHandlePlayerTimePeriod(CPlayer* pPlayer) const
 {
-	// Set a flag indicating whether time periods have been updated
+	// initialize variables
 	std::vector<int> aPeriodsUpdated {};
-
-	// Get the current time
 	time_t CurrentTimeStamp = time(nullptr);
 
-	// Check if it is a new day and update the daily time period if necessary
+	// check new days
 	if(time_is_new_day(pPlayer->Account()->m_Periods.m_DailyStamp, CurrentTimeStamp))
 	{
 		pPlayer->Account()->m_Periods.m_DailyStamp = CurrentTimeStamp;
 		aPeriodsUpdated.push_back(DAILY_STAMP);
 	}
 
-	// Check if it is a new week and update the weekly time period if necessary
+	// check new week
 	if(time_is_new_week(pPlayer->Account()->m_Periods.m_WeekStamp, CurrentTimeStamp))
 	{
 		pPlayer->Account()->m_Periods.m_WeekStamp = CurrentTimeStamp;
 		aPeriodsUpdated.push_back(WEEK_STAMP);
 	}
 
-	// Check if it is a new month and update the monthly time period if necessary
+	// check new month
 	if(time_is_new_month(pPlayer->Account()->m_Periods.m_MonthStamp, CurrentTimeStamp))
 	{
 		pPlayer->Account()->m_Periods.m_MonthStamp = CurrentTimeStamp;
 		aPeriodsUpdated.push_back(MONTH_STAMP);
 	}
 
-	// If any time period has been updated
+	// if any time period has been updated
 	if(!aPeriodsUpdated.empty())
 	{
-		// Save the account with the updated time periods
 		SaveAccount(pPlayer, SAVE_TIME_PERIODS);
-
-		// Check time periods for all components
 		for(const auto& component : m_System.m_vComponents)
 		{
 			for(const auto& periods : aPeriodsUpdated)
@@ -376,6 +393,7 @@ void CMmoController::OnHandlePlayerTimePeriod(CPlayer* pPlayer) const
 		}
 	}
 }
+
 
 // saving account
 void CMmoController::SaveAccount(CPlayer* pPlayer, int Table) const
@@ -445,13 +463,14 @@ void CMmoController::SaveAccount(CPlayer* pPlayer, int Table) const
 	}
 }
 
+
 void CMmoController::ShowTopList(VoteWrapper* pWrapper, int ClientID, ToplistType Type, int Rows) const
 {
+	auto vResult = GetTopList(Type, Rows);
+
 	if(Type == ToplistType::GuildLeveling)
 	{
 		pWrapper->SetTitle("Top 10 guilds leveling");
-
-		auto vResult = GetTopList(Type, Rows);
 		for(auto& Elem : vResult)
 		{
 			const auto Rank = Elem.first;
@@ -464,8 +483,6 @@ void CMmoController::ShowTopList(VoteWrapper* pWrapper, int ClientID, ToplistTyp
 	else if(Type == ToplistType::GuildWealthy)
 	{
 		pWrapper->SetTitle("Top 10 guilds wealthy");
-
-		auto vResult = GetTopList(Type, Rows);
 		for(auto& Elem : vResult)
 		{
 			const auto Rank = Elem.first;
@@ -477,8 +494,6 @@ void CMmoController::ShowTopList(VoteWrapper* pWrapper, int ClientID, ToplistTyp
 	else if(Type == ToplistType::PlayerRating)
 	{
 		pWrapper->SetTitle("Top 10 players rank points");
-
-		auto vResult = GetTopList(Type, Rows);
 		for(auto& Elem : vResult)
 		{
 			const auto Rank = Elem.first;
@@ -490,8 +505,6 @@ void CMmoController::ShowTopList(VoteWrapper* pWrapper, int ClientID, ToplistTyp
 	else if(Type == ToplistType::PlayerWealthy)
 	{
 		pWrapper->SetTitle("Top 10 players wealthy");
-
-		auto vResult = GetTopList(Type, Rows);
 		for(auto& Elem : vResult)
 		{
 			const auto Rank = Elem.first;
@@ -500,7 +513,28 @@ void CMmoController::ShowTopList(VoteWrapper* pWrapper, int ClientID, ToplistTyp
 			pWrapper->Add("{}. {} :: Wealthy(bank) {$} golds", Rank, Nickname, Bank);
 		}
 	}
+	else if(Type == ToplistType::PlayerExpert)
+	{
+		pWrapper->SetTitle("Top Specialists in the Realm");
+		for(auto& [Iter, Top] : vResult)
+		{
+			const char* pNickname = Instance::Server()->GetAccountNickname(Top.Data["AccountID"].to_int());
+			const auto Level = Top.Data["Level"].to_int();
+			pWrapper->Add("{}: '{-} - {}LV'.", Top.Name, pNickname, Level);
+		}
+	}
+	else if(Type == ToplistType::PlayerAttributes)
+	{
+		pWrapper->SetTitle("Top by attributes");
+		for(auto& [Iter, Top] : vResult)
+		{
+			const char* pNickname = Instance::Server()->GetAccountNickname(Top.Data["AccountID"].to_int());
+			const auto Value = Top.Data["Value"].to_int();
+			pWrapper->Add("{}: '{-} - {}'.", Top.Name, pNickname, Value);
+		}
+	}
 }
+
 
 std::map<int, CMmoController::TempTopData> CMmoController::GetTopList(ToplistType Type, int Rows) const
 {
@@ -520,7 +554,7 @@ std::map<int, CMmoController::TempTopData> CMmoController::GetTopList(ToplistTyp
 	}
 	else if(Type == ToplistType::GuildWealthy)
 	{
-		ResultPtr pRes = Database->Execute<DB::SELECT>("*", "tw_guilds", "ORDER BY Bank DESC LIMIT {}", Rows);
+		ResultPtr pRes = Database->Execute<DB::SELECT>("*", "tw_guilds", "ORDER BY Bank + 0 DESC LIMIT {}", Rows);
 		while(pRes->next())
 		{
 			const auto Rank = pRes->getRow();
@@ -553,23 +587,70 @@ std::map<int, CMmoController::TempTopData> CMmoController::GetTopList(ToplistTyp
 			field.Data["Bank"] = pRes->getBigInt("Bank");
 		}
 	}
+	else if(Type == ToplistType::PlayerExpert)
+	{
+		int Iter = 0;
+		auto& vTrackings = g_AccountListener.LevelingTracker().GetTrackings();
+		for(auto& [professionID, data] : vTrackings)
+		{
+			auto& field = vResult[Iter];
+			field.Name = GetProfessionName((ProfessionIdentifier)professionID);
+			field.Data["AccountID"] = data.AccountID;
+			field.Data["Level"] = data.Level;
+			Iter++;
+		}
+	}
+	else if(Type == ToplistType::PlayerAttributes)
+	{
+		int Iter = 0;
+		auto& vTrackings = g_InventoryListener.AttributeTracker().GetTrackings();
+		for(auto& [attributeID, data] : vTrackings)
+		{
+			auto* pAttributeInfo = GS()->GetAttributeInfo((AttributeIdentifier)attributeID);
+			if(pAttributeInfo)
+			{
+				auto& field = vResult[Iter];
+				field.Name = pAttributeInfo->GetName();
+				field.Data["AccountID"] = data.AccountID;
+				field.Data["Value"] = data.Amount;
+				Iter++;
+			}
+		}
+	}
 
 	return vResult;
 }
 
-void CMmoController::AsyncClientEnterMsgInfo(const std::string ClientName, int ClientID)
+std::map<int, CMmoController::TempTopData> CMmoController::GetDungeonTopList(int DungeonID, int Rows) const
 {
-	CSqlString<MAX_NAME_LENGTH> PlayerName(ClientName.c_str());
-	const auto AsyncEnterRes = Database->Prepare<DB::SELECT>("ID, Nick", "tw_accounts_data", "WHERE Nick = '{}'", PlayerName.cstr());
+	std::map<int, TempTopData> vResult {};
 
-	AsyncEnterRes->AtExecute([PlayerName = std::string(PlayerName.cstr()), ClientID](ResultPtr pRes)
+	ResultPtr pRes = Database->Execute<DB::SELECT>("*", "tw_dungeons_records", "WHERE DungeonID = '{}' ORDER BY Time DESC LIMIT {}", DungeonID, Rows);
+	while(pRes->next())
+	{
+		const auto Rank = pRes->getRow();
+		auto& field = vResult[Rank];
+		field.Name = GS()->Server()->GetAccountNickname(pRes->getInt("UserID"));
+		field.Data["Time"] = pRes->getInt("Time");
+	}
+
+	return vResult;
+}
+
+
+void CMmoController::AsyncClientEnterMsgInfo(std::string_view ClientName, int ClientID)
+{
+	CSqlString<MAX_NAME_LENGTH> Nickname(ClientName.data());
+	const auto AsyncEnterRes = Database->Prepare<DB::SELECT>("ID, Nick", "tw_accounts_data", "WHERE Nick = '{}'", Nickname.cstr());
+
+	AsyncEnterRes->AtExecute([CapturedNickname = std::string(Nickname.cstr()), ClientID](ResultPtr pRes)
 	{
 		auto* pGS = (CGS*)Instance::Server()->GameServerPlayer(ClientID);
 
 		if(!pRes->next())
 		{
 			pGS->Chat(ClientID, "You need to register using /register <login> <pass>!");
-			pGS->Chat(-1, "Apparently, we have a new player, '{}'!", PlayerName.c_str());
+			pGS->Chat(-1, "Apparently, we have a new player, '{}'!", CapturedNickname);
 			return;
 		}
 
@@ -577,12 +658,13 @@ void CMmoController::AsyncClientEnterMsgInfo(const std::string ClientName, int C
 	});
 }
 
+
 // dump dialogs for translate
 void CMmoController::SyncLocalizations() const
 {
 	// check action state
 	static std::mutex ms_mtxDump;
-	if (!ms_mtxDump.try_lock())
+	if(!ms_mtxDump.try_lock())
 	{
 		GS()->Console()->Print(IConsole::OUTPUT_LEVEL_STANDARD, "sync_lines", "Wait the last operation is in progress..");
 		return;

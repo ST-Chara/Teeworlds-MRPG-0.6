@@ -267,44 +267,62 @@ namespace mystd
 	 */
 	namespace string
 	{
-		inline std::string progressBar(uint64_t maxValue, uint64_t currentValue, int totalSteps, const std::string& Fillsymbols, const std::string& EmptySymbols)
+		inline std::string progressBar(uint64_t maxValue, uint64_t currentValue, int totalSteps, const std::string& FillSymbols, const std::string& EmptySymbols)
 		{
-			std::string resutStr;
-			const auto numFilled = currentValue / totalSteps;
-			const auto numEmpty = maxValue / totalSteps - numFilled;
-			resutStr.reserve(numFilled + numEmpty);
+			if(maxValue == 0)
+				return "";
 
-			for(int i = 0; i < numFilled; i++)
-			{
-				resutStr += Fillsymbols;
-			}
+			currentValue = std::min(currentValue, maxValue);
+			const auto progress = static_cast<double>(currentValue) / maxValue;
+			const auto numFilled = static_cast<int>(progress * totalSteps);
+			const auto numEmpty = totalSteps - numFilled;
 
-			for(int i = 0; i < numEmpty; i++)
-			{
-				resutStr += EmptySymbols;
-			}
+			std::string resultStr;
+			resultStr.reserve(numFilled * FillSymbols.length() + numEmpty * EmptySymbols.length());
+			for(int i = 0; i < numFilled; ++i)
+				resultStr += FillSymbols;
 
-			return resutStr;
+			for(int i = 0; i < numEmpty; ++i)
+				resultStr += EmptySymbols;
+
+			return resultStr;
 		}
 
-		inline std::vector<std::string> splitLines(const std::string& input)
+		inline std::string trim(std::string_view sv)
+		{
+			constexpr std::string_view whitespace = " \t\n\r\f\v";
+			const auto start = sv.find_first_not_of(whitespace);
+			if(start == std::string::npos)
+				return "";
+			const auto end = sv.find_last_not_of(whitespace);
+			return std::string(sv.substr(start, end - start + 1));
+		}
+
+
+		inline std::pair<std::string, std::string> split_by_delimiter(std::string_view InputString, char Delimiter)
+		{
+			const auto DelimiterPos = InputString.find(Delimiter);
+			if(DelimiterPos != std::string_view::npos)
+				return { trim(InputString.substr(0, DelimiterPos)), trim(InputString.substr(DelimiterPos + 1)) };
+			else
+				return { trim(InputString), {} };
+		}
+
+		inline std::vector<std::string> split_lines(const std::string& input)
 		{
 			std::vector<std::string> lines;
-			std::string current_line;
+			std::string_view sv(input);
+			size_t current_pos = 0;
+			size_t newline_pos;
 
-			for(char c : input)
+			while((newline_pos = sv.find('\n', current_pos)) != std::string_view::npos)
 			{
-				if(c == '\n')
-				{
-					lines.push_back(current_line);
-					current_line.clear();
-				}
-				else
-					current_line += c;
+				lines.emplace_back(sv.substr(current_pos, newline_pos - current_pos));
+				current_pos = newline_pos + 1;
 			}
 
-			if(!current_line.empty())
-				lines.push_back(current_line);
+			if(current_pos < sv.length())
+				lines.emplace_back(sv.substr(current_pos));
 
 			return lines;
 		}
@@ -384,22 +402,27 @@ namespace mystd
 		{
 			static const std::unordered_map<int, char> translit =
 			{
+				{0x0401, 'E'}, {0x0451, 'e'},
 				{0x0410, 'A'}, {0x0430, 'a'},
-				{0x0421, 'C'}, {0x0441, 'c'},
-				{0x0415, 'E'}, {0x0435, 'e'},
-				{0x041E, 'O'}, {0x043E, 'o'},
-				{0x041C, 'M'},
-				{0x0425, 'X'}, {0x0445, 'x'},
+				{0x0411, '6'}, {0x0431, '6'},
 				{0x0412, 'B'},
-				{0x041A, 'K'},
-				{0x0443, 'y'},
-				{0x0422, 'T'},
-				{0x0420, 'P'}, {0x0440, 'p'},
-				{0x0417, '3'},
+				{0x0433, 'r'},
 				{0x0414, 'D'}, {0x0434, 'g'},
+				{0x0415, 'E'}, {0x0435, 'e'},
+				{0x0417, '3'},
 				{0x0438, 'u'},
+				{0x0439, 'u'},
+				{0x041A, 'K'},
+				{0x041C, 'M'},
 				{0x041D, 'H'},
-				{0x043F, 'n'}
+				{0x041E, 'O'}, {0x043E, 'o'},
+				{0x043F, 'n'},
+				{0x0420, 'P'}, {0x0440, 'p'},
+				{0x0421, 'C'}, {0x0441, 'c'},
+				{0x0422, 'T'}, {0x0442, 'm'},
+				{0x0443, 'y'},
+				{0x0425, 'X'}, {0x0445, 'x'},
+				{0x042C, 'b'},
 			};
 
 			char* pWrite = pStr;
@@ -418,7 +441,6 @@ namespace mystd
 			}
 			*pWrite = '\0';
 		}
-
 	}
 
 
@@ -431,20 +453,38 @@ namespace mystd
 	 */
 	namespace json
 	{
-		inline void parse(const std::string& Data, const std::function<void(nlohmann::json& pJson)>& pFuncCallback)
+		inline bool parse(const std::string& Data, const std::function<void(nlohmann::json& pJson)>& pFuncCallback)
 		{
-			if(!Data.empty())
+			if(Data.empty())
+				return true;
+
+			if(!pFuncCallback)
+				dbg_assert(pFuncCallback != nullptr, "[json parse] Callback function is null.");
+
+			try
 			{
-				try
-				{
-					nlohmann::json JsonData = nlohmann::json::parse(Data);
-					pFuncCallback(JsonData);
-				}
-				catch(nlohmann::json::exception& s)
-				{
-					dbg_assert(false, fmt_default("[json parse] Invalid json: {}", s.what()).c_str());
-				}
+				nlohmann::json JsonData = nlohmann::json::parse(Data);
+				pFuncCallback(JsonData);
+				return false;
 			}
+			catch(const nlohmann::json::parse_error& e)
+			{
+				dbg_msg("[json parse] Invalid json: %s", e.what());
+			}
+			catch(const nlohmann::json::exception& e)
+			{
+				dbg_assert(false, fmt_default("[json parse] JSON library exception: {}", e.what()).c_str());
+			}
+			catch(const std::exception& e)
+			{
+				dbg_assert(false, fmt_default("[json parse] Standard exception during processing: {}", e.what()).c_str());
+			}
+			catch(...)
+			{
+				dbg_assert(false, "[json parse] Unknown non-standard exception during processing.");
+			}
+
+			return true;
 		}
 	}
 
@@ -461,7 +501,7 @@ namespace mystd
 	{
 		enum result : int
 		{
-			ERROR_FILE,
+			ERROR_FILE = 0,
 			SUCCESSFUL,
 		};
 
@@ -658,6 +698,54 @@ namespace mystd
 		{
 			m_umConfig.erase(key);
 		}
+	};
+
+	template <std::integral id_type>
+	class string_mapper
+	{
+	public:
+		[[nodiscard]] id_type string_to_id(const std::string& str)
+		{
+			auto it = m_vStrToIdsMap.find(str);
+			if(it == m_vStrToIdsMap.end())
+			{
+				if(m_NextID >= std::numeric_limits<id_type>::max())
+					m_NextID = 0;
+
+				id_type new_id = m_NextID++;
+				m_vStrToIdsMap[str] = new_id;
+				m_vIdsToStrMap[new_id] = str;
+				return new_id;
+			}
+
+			return it->second;
+		}
+
+		[[nodiscard]] std::optional<std::string> id_to_string(id_type id) const
+		{
+			auto it = m_vIdsToStrMap.find(id);
+			if(it != m_vIdsToStrMap.end())
+			{
+				return it->second;
+			}
+			return std::nullopt;
+		}
+
+		[[nodiscard]] bool has_string(const std::string& str) const { return m_vStrToIdsMap.count(str) > 0; }
+		[[nodiscard]] bool has_id(id_type id) const { return m_vIdsToStrMap.count(id) > 0; }
+		[[nodiscard]] size_t count() const { return m_vStrToIdsMap.size(); }
+
+		void clear()
+		{
+			m_vStrToIdsMap.clear();
+			m_vIdsToStrMap.clear();
+			m_NextID = 0;
+		}
+
+	private:
+		std::map<std::string, id_type> m_vStrToIdsMap;
+		std::map<id_type, std::string> m_vIdsToStrMap;
+		id_type m_NextID = 0;
 	};
 }
 

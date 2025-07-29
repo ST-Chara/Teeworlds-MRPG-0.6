@@ -4,7 +4,7 @@
 #define GAME_SERVER_PLAYER_H
 
 #include "core/components/accounts/account_data.h"
-#include "core/components/Inventory/ItemData.h"
+#include "core/components/inventory/item_data.h"
 #include "core/components/quests/quest_data.h"
 #include "core/components/skills/skill_data.h"
 
@@ -12,7 +12,6 @@
 #include "core/tools/cooldown.h"
 #include "core/tools/effect_manager.h"
 #include "core/tools/motd_menu.h"
-#include "core/tools/scenario_manager.h"
 #include "core/tools/vote_wrapper.h"
 
 class CPlayerBot;
@@ -36,7 +35,7 @@ class CPlayer
 		int m_TargetY;
 	};
 
-	int m_SnapHealthNicknameTick;
+	int m_ShowHealthNicknameTick;
 
 protected:
 	IServer* Server() const;
@@ -49,12 +48,11 @@ protected:
 	bool m_LastInputInit {};
 	int64_t m_LastPlaytime {};
 	FixedViewCam m_FixedView {};
-	ScenarioManager m_Scenarios {};
+	std::map<AttributeIdentifier, int> m_aStats {};
 
 public:
 	CGS* GS() const { return m_pGS; }
 	FixedViewCam& LockedView() { return m_FixedView; }
-	ScenarioManager& Scenarios() { return m_Scenarios; }
 
 	vec2 m_ViewPos{};
 	int m_PlayerFlags{};
@@ -63,7 +61,13 @@ public:
 	char m_aInitialClanBuffer[128]{};
 	Mood m_MoodState{};
 	int m_ActiveCraftGroupID{};
+	CRandomItem m_CurrentRandomItem {};
 	std::unique_ptr<MotdMenu> m_pMotdMenu{};
+	std::optional<ItemGroup> m_InventoryItemGroupFilter{};
+	std::optional<ItemType> m_InventoryItemTypeFilter{};
+	std::optional<int> m_GroupFilter{};
+	std::optional<int> m_SubgroupFilter {};
+
 
 	char m_aLastMsg[256]{};
 	StructLatency m_Latency;
@@ -105,18 +109,20 @@ public:
 	virtual const CTeeInfo& GetTeeInfo() const;
 	virtual int GetMaxHealth() const;
 	virtual int GetMaxMana() const;
-	virtual	int GetHealth() const { return GetTempData().m_TempHealth; }
-	virtual	int GetMana() const { return GetTempData().m_TempMana; }
+	virtual	int GetHealth() const { return GetSharedData().m_Health; }
+	virtual	int GetMana() const { return GetSharedData().m_Mana; }
 
 	virtual void HandleTuningParams();
 	virtual int64_t GetMaskVisibleForClients() const { return -1; }
-	virtual ESnappingPriority IsActiveForClient(int ClientID) const { return SNAPPING_PRIORITY_HIGH; }
-	virtual std::optional<int> GetEquippedItemID(ItemType EquipID, int SkipItemID = -1) const;
-	virtual bool IsEquipped(ItemType EquipID) const;
-	virtual int GetTotalAttributeValue(AttributeIdentifier ID) const;
-	float GetAttributeChance(AttributeIdentifier ID) const;
-	virtual void UpdateTempData(int Health, int Mana);
+	virtual ESnappingPriority IsActiveForClient(int ClientID) const { return ESnappingPriority::High; }
+	virtual std::optional<int> GetEquippedSlotItemID(ItemType EquipID) const;
+	virtual bool IsEquippedSlot(ItemType EquipID) const;
+	virtual int GetTotalRawAttributeValue(AttributeIdentifier ID) const;
+	std::optional<float> GetTotalAttributeChance(AttributeIdentifier ID) const;
+	virtual void UpdateSharedCharacterData(int Health, int Mana);
 
+	int GetTotalAttributeValue(AttributeIdentifier AttributeID) const;
+	void UpdateTotalAttributeValue(AttributeIdentifier AttributeID, int Value) { m_aStats[AttributeID] = Value; }
 	void FormatBroadcastBasicStats(char* pBuffer, int Size, const char* pAppendStr = "\0") const;
 
 	virtual void Tick();
@@ -155,17 +161,14 @@ public:
 	virtual CPlayerItem* GetItem(ItemIdentifier ID);
 	CSkill* GetSkill(int SkillID) const;
 	CPlayerQuest* GetQuest(QuestIdentifier ID) const;
-	CAccountTempData& GetTempData() const { return CAccountTempData::ms_aPlayerTempData[m_ClientID]; }
+	CAccountSharedData& GetSharedData() const { return CAccountSharedData::ms_aPlayerSharedData[m_ClientID]; }
 	CAccountData* Account() const { return &CAccountData::ms_aData[m_ClientID]; }
 
-	int GetTotalAttributesInGroup(AttributeGroup Type) const;
-	int GetTotalAttributes() const;
-
-	void SetSnapHealthTick(int Sec);
+	void ShowHealthNickname(int Sec);
 	bool IsSameMotdMenu(int Menulist) const { return m_pMotdMenu && m_pMotdMenu->GetMenulist() == Menulist; }
 	void CloseMotdMenu() { m_pMotdMenu->ClearMotd(); }
 
-	void ChangeWorld(int WorldID, std::optional<vec2> newWorldPosition = std::nullopt) const;
+	void ChangeWorld(int WorldID, std::optional<vec2> newWorldPosition = std::nullopt);
 	void StartUniversalScenario(const std::string& ScenarioData, int ScenarioID);
 };
 

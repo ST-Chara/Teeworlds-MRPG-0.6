@@ -3,10 +3,11 @@
 #ifndef GAME_SERVER_COMPONENT_BOT_DATA_H
 #define GAME_SERVER_COMPONENT_BOT_DATA_H
 
-#include <game/server/core/components/Inventory/ItemData.h>
+#include <game/server/core/components/inventory/item_data.h>
 #include "DialogsData.h"
 
 // TODO: required rewrite full code
+class CCollision;
 
 /************************************************************************/
 /*  Global data information bot                                         */
@@ -134,7 +135,7 @@ public:
 
 	const char* GetName() const { return DataBotInfo::ms_aDataBot[m_BotID].m_aNameBot; }
 	static bool IsValid(int MobID) { return ms_aQuestBot.find(MobID) != ms_aQuestBot.end() && DataBotInfo::IsDataBotValid(ms_aQuestBot[MobID].m_BotID); }
-	void InitTasksFromJSON(const std::string& JsonData);
+	void InitTasksFromJSON(CCollision* pCollision, const std::string& JsonData);
 
 	static std::map<int, QuestBotInfo> ms_aQuestBot;
 };
@@ -144,10 +145,10 @@ public:
 /************************************************************************/
 enum MobBehaviorFlags
 {
-	MOBFLAG_BEHAVIOR_DEFAULT = 0,
-	MOBFLAG_BEHAVIOR_SLOWER = 1 << 1,
-	MOBFLAG_BEHAVIOR_NEUTRAL = 1 << 2,
-	MOBFLAG_BEHAVIOR_AGGRESSIVE = 1 << 3,
+	MOBFLAG_BEHAVIOR_SLEEPY = 1 << 1,
+	MOBFLAG_BEHAVIOR_SLOWER = 1 << 2,
+	MOBFLAG_BEHAVIOR_POISONOUS = 1 << 3,
+	MOBFLAG_BEHAVIOR_NEUTRAL = 1 << 4,
 };
 
 class CMobDebuff
@@ -188,6 +189,7 @@ class MobBotInfo
 {
 	friend class CBotManager;
 	std::deque < CMobDebuff > m_Effects;
+	int64_t m_BehaviorsFlags {};
 
 public:
 	bool m_Boss {};
@@ -200,31 +202,17 @@ public:
 	int m_aDropItem[MAX_DROPPED_FROM_MOBS] {};
 	int m_aValueItem[MAX_DROPPED_FROM_MOBS] {};
 	float m_aRandomItem[MAX_DROPPED_FROM_MOBS] {};
-	DBSet m_Behaviors;
 	int m_BotID {};
 
-	const char* GetName() const
-	{
-		return DataBotInfo::ms_aDataBot[m_BotID].m_aNameBot;
-	}
-
-	std::deque < CMobDebuff >& GetDebuffs()
-	{
-		return m_Effects;
-	}
-
-	[[nodiscard]] CMobDebuff* GetRandomDebuff()
-	{
-		return m_Effects.empty() ? nullptr : &m_Effects[rand() % m_Effects.size()];
-	}
-
+	void InitBehaviors(const DBSet& Behavior);
 	void InitDebuffs(int Seconds, int Range, float Chance, const DBSet& buffSets);
 
-	static bool IsValid(int MobID)
-	{
-		return ms_aMobBot.find(MobID) != ms_aMobBot.end() && DataBotInfo::IsDataBotValid(ms_aMobBot[MobID].m_BotID);
-	}
+	bool HasBehaviorFlag(int64_t Flag) const { return (m_BehaviorsFlags & Flag) != 0; }
+	const char* GetName() const { return DataBotInfo::ms_aDataBot[m_BotID].m_aNameBot; }
+	std::deque < CMobDebuff >& GetDebuffs() { return m_Effects; }
+	[[nodiscard]] CMobDebuff* GetRandomDebuff() { return m_Effects.empty() ? nullptr : &m_Effects[rand() % m_Effects.size()]; }
 
+	static bool IsValid(int MobID) { return ms_aMobBot.find(MobID) != ms_aMobBot.end() && DataBotInfo::IsDataBotValid(ms_aMobBot[MobID].m_BotID); }
 	static std::map<int, MobBotInfo> ms_aMobBot;
 };
 

@@ -1,5 +1,6 @@
 /* (c) Magnus Auvinen. See licence.txt in the root of the distribution for more information. */
 /* If you are missing that file, acquire a complete release at teeworlds.com.                */
+#include <game/collision.h>
 #include "BotData.h"
 
 std::map< int, DataBotInfo > DataBotInfo::ms_aDataBot;
@@ -7,6 +8,17 @@ std::map< int, NpcBotInfo > NpcBotInfo::ms_aNpcBot;
 std::map< int, QuestBotInfo > QuestBotInfo::ms_aQuestBot;
 std::map< int, MobBotInfo > MobBotInfo::ms_aMobBot;
 
+void MobBotInfo::InitBehaviors(const DBSet& Behavior)
+{
+	if(Behavior.hasSet("sleepy"))
+		m_BehaviorsFlags |= MOBFLAG_BEHAVIOR_SLEEPY;
+	if(Behavior.hasSet("slower"))
+		m_BehaviorsFlags |= MOBFLAG_BEHAVIOR_SLOWER;
+	if(Behavior.hasSet("poisonous"))
+		m_BehaviorsFlags |= MOBFLAG_BEHAVIOR_POISONOUS;
+	if(Behavior.hasSet("neutral"))
+		m_BehaviorsFlags |= MOBFLAG_BEHAVIOR_NEUTRAL;
+}
 
 /************************************************************************/
 /*  Global data bot                                               */
@@ -27,9 +39,9 @@ MobBotInfo* DataBotInfo::FindMobByBot(int BotID)
 /************************************************************************/
 void MobBotInfo::InitDebuffs(int Seconds, int Range, float Chance, const DBSet& buffSets)
 {
-	for(auto& def : buffSets.GetDataItems())
+	for(auto& def : buffSets.getItems())
 	{
-		CMobDebuff debuff(Chance, def.first, std::make_pair(Seconds, Range));
+		CMobDebuff debuff(Chance, def, std::make_pair(Seconds, Range));
 		m_Effects.emplace_back(debuff);
 	}
 }
@@ -37,7 +49,7 @@ void MobBotInfo::InitDebuffs(int Seconds, int Range, float Chance, const DBSet& 
 /************************************************************************/
 /*  Global data quest bot                                               */
 /************************************************************************/
-void QuestBotInfo::InitTasksFromJSON(const std::string& JsonData)
+void QuestBotInfo::InitTasksFromJSON(CCollision* pCollision, const std::string& JsonData)
 {
 	mystd::json::parse(JsonData, [&](const nlohmann::json& pJson)
 	{
@@ -47,7 +59,7 @@ void QuestBotInfo::InitTasksFromJSON(const std::string& JsonData)
 			for(const auto& p : pJson["required_items"])
 			{
 				TaskRequiredItems Task;
-				Task.m_Item = CItem::FromJSON(p);
+				p.get_to(Task.m_Item);
 
 				if(Task.m_Item.IsValid())
 				{
@@ -65,7 +77,7 @@ void QuestBotInfo::InitTasksFromJSON(const std::string& JsonData)
 		}
 
 		// initilize reward items
-		m_RewardItems = CItem::FromArrayJSON(pJson, "reward_items");
+		m_RewardItems = pJson.value("reward_items", CItemsContainer {});
 
 		// initilize defeat bots
 		if(pJson.contains("defeat_bots"))
@@ -88,7 +100,9 @@ void QuestBotInfo::InitTasksFromJSON(const std::string& JsonData)
 
 			for(const auto& p : pJson["move_to"])
 			{
-				const vec2 Position = { p.value("x", -1.f), p.value("y", -1.f) };
+				const auto Pos = vec2(p.value("x", -1.f), p.value("y", -1.f));
+				const auto VerifyPos = pCollision->VerifyPoint(CCollision::COLFLAG_DEATH | CCollision::COLFLAG_SOLID,
+					Pos, "QuestTask: Mob(ID:{}), Pos(X:{}({}), Y:{}({})) - invalid (death, solid) position.", m_ID, Pos.x, Pos.x / 32.f, Pos.y, Pos.y / 32.f);
 				const int WorldID = p.value("world_id", m_WorldID);
 				const int Step = p.value("step", 1);
 				const float Cooldown = p.value("cooldown", 0.f);
@@ -107,14 +121,14 @@ void QuestBotInfo::InitTasksFromJSON(const std::string& JsonData)
 					// pickup item
 					if(p.contains("pick_up_item"))
 					{
-						PickUpItem = CItem::FromJSON(p["pick_up_item"]);
+						PickUpItem = p.value("pick_up_item", CItem{});
 						Type |= TaskAction::Types::TFPICKUP_ITEM;
 					}
 
 					// required item
 					if(p.contains("required_item"))
 					{
-						RequiredItem = CItem::FromJSON(p["required_item"]);
+						RequiredItem = p.value("required_item", CItem {});
 						Type |= TaskAction::Types::TFREQUIRED_ITEM;
 					}
 
@@ -163,24 +177,21 @@ void QuestBotInfo::InitTasksFromJSON(const std::string& JsonData)
 				}
 
 				// add new move_to point
-				if(!is_negative_vec(Position))
-				{
-					TaskAction Move;
-					Move.m_WorldID = WorldID;
-					Move.m_Step = LatestBiggerStep;
-					Move.m_Navigator = Navigator;
-					Move.m_Cooldown = (int)(Cooldown * (float)SERVER_TICK_SPEED);
-					Move.m_PickupItem = PickUpItem;
-					Move.m_RequiredItem = RequiredItem;
-					Move.m_Position = Position;
-					Move.m_CompletionText = CompletionText;
-					Move.m_TaskName = TaskName;
-					Move.m_TypeFlags = maximum(Type, (unsigned int)TaskAction::Types::TFMOVING);
-					Move.m_QuestBotID = m_ID;
-					Move.m_Interaction = Interactive;
-					Move.m_DefeatMobInfo = DefeatDescription;
-					m_vRequiredMoveAction.push_back(Move);
-				}
+				TaskAction Move;
+				Move.m_WorldID = WorldID;
+				Move.m_Step = LatestBiggerStep;
+				Move.m_Navigator = Navigator;
+				Move.m_Cooldown = (int)(Cooldown * (float)SERVER_TICK_SPEED);
+				Move.m_PickupItem = PickUpItem;
+				Move.m_RequiredItem = RequiredItem;
+				Move.m_Position = VerifyPos;
+				Move.m_CompletionText = CompletionText;
+				Move.m_TaskName = TaskName;
+				Move.m_TypeFlags = maximum(Type, (unsigned int)TaskAction::Types::TFMOVING);
+				Move.m_QuestBotID = m_ID;
+				Move.m_Interaction = Interactive;
+				Move.m_DefeatMobInfo = DefeatDescription;
+				m_vRequiredMoveAction.push_back(Move);
 			}
 		}
 	});

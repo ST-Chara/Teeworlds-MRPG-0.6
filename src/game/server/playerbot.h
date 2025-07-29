@@ -34,6 +34,7 @@ class CPlayerBot : public CPlayer
 	bool m_DisabledBotDamage{};
 	int m_AllowedSpawn{};
 	CQuestBotMobInfo m_QuestMobInfo{};
+	MobBotInfo m_MobInfo {};
 
 public:
 	int m_LastPosTick{};
@@ -44,11 +45,10 @@ public:
 	CPlayerBot(CGS* pGS, int ClientID, int BotID, int MobID, int SpawnPoint);
 	~CPlayerBot() override;
 
-	void InitQuestBotMobInfo(CQuestBotMobInfo elem);
-	CQuestBotMobInfo& GetQuestBotMobInfo()
-	{
-		return m_QuestMobInfo;
-	}
+	void InitBotMobInfo(const MobBotInfo& elem);
+	void InitQuestBotMobInfo(const CQuestBotMobInfo& elem);
+	CQuestBotMobInfo& GetQuestBotMobInfo() { return m_QuestMobInfo; }
+	MobBotInfo& GetMobInfo() { return m_MobInfo; }
 
 	int GetTeam() override { return TEAM_BLUE; }
 	bool IsBot() const override { return true; }
@@ -65,7 +65,7 @@ public:
 	int GetMana() const override { return m_Mana; }
 
 	void HandleTuningParams() override;
-	void UpdateTempData(int Health, int Mana) override
+	void UpdateSharedCharacterData(int Health, int Mana) override
 	{
 		m_Health = Health;
 		m_Mana = Mana;
@@ -73,8 +73,8 @@ public:
 
 	int64_t GetMaskVisibleForClients() const override;
 	ESnappingPriority IsActiveForClient(int ClientID) const override;
-	std::optional<int> GetEquippedItemID(ItemType EquipID, int SkipItemID = -1) const override;
-	int GetTotalAttributeValue(AttributeIdentifier ID) const override;
+	std::optional<int> GetEquippedSlotItemID(ItemType EquipID) const override;
+	int GetTotalRawAttributeValue(AttributeIdentifier ID) const override;
 
 	void Tick() override;
 	void PostTick() override;
@@ -85,6 +85,7 @@ public:
 	bool IsConversational() const;
 	void PrepareRespawnTick() override;
 
+	bool IsAllowedSpawn() { return m_AllowedSpawn; }
 	void SetAllowedSpawn(bool Spawn) { m_AllowedSpawn = Spawn; }
 
 	int m_EidolonItemID;
